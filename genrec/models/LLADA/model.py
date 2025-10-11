@@ -244,10 +244,15 @@ class LLaDARecommender(AbstractModel):
                 # (num_valid_labels, codebook_size)
                 
                 # Get labels for digit i (adjust for token offset)
+                # target_codes are original semantic IDs (before masking)
                 labels = target_codes[:, i] - i * self.config['codebook_size'] - 1
                 
-                # Only compute loss for masked positions
-                masked_at_i = mask[:, i]
+                # Ensure labels are in valid range [0, codebook_size-1]
+                valid_label_mask = (labels >= 0) & (labels < self.config['codebook_size'])
+                
+                # Only compute loss for masked positions with valid labels
+                masked_at_i = mask[:, i] & valid_label_mask
+                
                 if masked_at_i.any():
                     loss_i = F.cross_entropy(
                         logits[masked_at_i], 
