@@ -185,9 +185,9 @@ class LLaDARecommender(AbstractModel):
         batch_size = batch['input_ids'].shape[0]
         device = batch['input_ids'].device
         
-        # Get valid labels (filter out -100)
+        # Get valid labels (filter out -100 and 0 which is padding)
         labels_flat = batch['labels'].view(-1)
-        label_mask = labels_flat != -100
+        label_mask = (labels_flat != -100) & (labels_flat > 0)
         valid_labels = labels_flat[label_mask]
         
         # Get number of valid labels per batch
