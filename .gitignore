@@ -1,0 +1,8 @@
+cache
+checkpoints
+ckpt
+log
+logs
+tensorboard
+__pycache__
+datasets
