@@ -6,6 +6,9 @@
 
 """
 Tokenizer for LLaDA model - extends RPG tokenizer with MASK token
+
+Note: This tokenizer reuses all semantic IDs from RPG (no need to retrain OPQ).
+Only adds a MASK token for diffusion training.
 """
 
 from genrec.models.RPG.tokenizer import RPGTokenizer
@@ -14,6 +17,9 @@ from genrec.models.RPG.tokenizer import RPGTokenizer
 class LLaDATokenizer(RPGTokenizer):
     """
     LLaDA Tokenizer with MASK token support
+    
+    Inherits from RPGTokenizer to reuse existing semantic IDs.
+    The only change is adding a MASK token for diffusion.
     
     Vocabulary structure:
         0: [PAD]
@@ -26,6 +32,7 @@ class LLaDATokenizer(RPGTokenizer):
     """
     
     def __init__(self, config: dict, dataset):
+        # Inherit all RPG tokenization (semantic IDs, OPQ, etc.)
         super().__init__(config, dataset)
         
         # Add MASK token after EOS

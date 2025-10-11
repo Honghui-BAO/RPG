@@ -4,6 +4,17 @@ This directory contains documentation for the RPG (Representation Planning with 
 
 ## 📁 Documents
 
+### RPG Code Analysis
+
+- **[RPG_Code_Analysis.md](RPG_Code_Analysis.md)** - 深度代码分析文档（中文）
+  - 抽象类设计模式
+  - OPQ训练流程详解
+  - Tokenizer动态加载机制
+  - Inference推理流程
+  - Item-Item图设计
+  - Semantic IDs与GPT2词表
+  - PCA降维原理
+
 ### LLaDA Implementation
 
 - **[LLADA_DESIGN.md](LLADA_DESIGN.md)** - Complete design document for LLaDA-style diffusion model
