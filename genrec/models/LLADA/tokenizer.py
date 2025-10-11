@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Tokenizer for LLaDA model - extends RPG tokenizer with MASK token
+Tokenizer for LLADA model - extends RPG tokenizer with MASK token
 
 Note: This tokenizer reuses all semantic IDs from RPG (no need to retrain OPQ).
 Only adds a MASK token for diffusion training.
@@ -14,9 +14,9 @@ Only adds a MASK token for diffusion training.
 from genrec.models.RPG.tokenizer import RPGTokenizer
 
 
-class LLaDATokenizer(RPGTokenizer):
+class LLADATokenizer(RPGTokenizer):
     """
-    LLaDA Tokenizer with MASK token support
+    LLADA Tokenizer with MASK token support
     
     Inherits from RPGTokenizer to reuse existing semantic IDs.
     The only change is adding a MASK token for diffusion.
@@ -28,7 +28,7 @@ class LLaDATokenizer(RPGTokenizer):
         ...
         7937-8192: digit 31 codes
         8193: [EOS]
-        8194: [MASK]  ← New for LLaDA
+        8194: [MASK]  ← New for LLADA
     """
     
     def __init__(self, config: dict, dataset):
