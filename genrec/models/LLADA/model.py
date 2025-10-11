@@ -185,58 +185,54 @@ class LLaDARecommender(AbstractModel):
         batch_size = batch['input_ids'].shape[0]
         device = batch['input_ids'].device
         
-        # Sample timesteps
-        t = torch.randint(1, self.T + 1, (batch_size,), device=device)
+        # Get valid labels (filter out -100)
+        labels_flat = batch['labels'].view(-1)
+        label_mask = labels_flat != -100
+        valid_labels = labels_flat[label_mask]
         
-        # Get target item codes
-        target_codes = self.item_id2tokens[batch['labels'].view(-1)]  # (batch_size, n_digit)
+        # Get number of valid labels per batch
+        num_valid = label_mask.view(batch_size, -1).sum(dim=1)
+        
+        # Sample timesteps for each valid label
+        t = torch.randint(1, self.T + 1, (valid_labels.shape[0],), device=device)
+        
+        # Get target item codes for valid labels
+        target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
         
         # Forward diffusion: mask some codes
         masked_codes, mask = self.forward_diffusion(target_codes, t)
         
-        # Construct input sequence: [history items] + [masked target]
-        # History items: batch['input_ids'] (batch_size, seq_len)
-        # We need to add masked_codes as a new item
-        
+        # For LLADA, we use the same architecture as RPG but predict masked tokens
         # Get embeddings for history items
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
         input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
         
-        # Get embeddings for masked target
-        target_embs = self.gpt2.wte(masked_codes).mean(dim=-1, keepdim=True)  # (batch_size, 1, n_embd)
-        
-        # Concatenate
-        all_embs = torch.cat([input_embs, target_embs], dim=1)  # (batch_size, seq_len+1, n_embd)
-        
-        # Add time step information to target position
-        time_emb = self.time_embed(t)  # (batch_size, n_embd)
-        all_embs[:, -1, :] = all_embs[:, -1, :] + time_emb
-        
-        # Extend attention mask for target item
-        attention_mask_extended = torch.cat([
-            batch['attention_mask'],
-            torch.ones(batch_size, 1, device=device, dtype=batch['attention_mask'].dtype)
-        ], dim=1)
-        
         # Pass through GPT2
         outputs = self.gpt2(
-            inputs_embeds=all_embs,
-            attention_mask=attention_mask_extended
+            inputs_embeds=input_embs,
+            attention_mask=batch['attention_mask']
         )
         
-        # Get representations for target position
-        target_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
-        
-        # Predict codes for all positions
-        final_states = [self.pred_heads[i](target_hidden).unsqueeze(1) for i in range(self.n_pred_head)]
-        final_states = torch.cat(final_states, dim=1)  # (batch_size, n_digit, n_embd)
+        # Get representations for all positions (like RPG)
+        final_states = [self.pred_heads[i](outputs.last_hidden_state).unsqueeze(-2) for i in range(self.n_pred_head)]
+        final_states = torch.cat(final_states, dim=-2)  # (batch_size, seq_len, n_digit, n_embd)
         
         outputs.final_states = final_states
         
         if return_loss:
-            # Normalize states and token embeddings
-            final_states_norm = F.normalize(final_states, dim=-1)  # (batch_size, n_digit, n_embd)
-            token_emb = self.gpt2.wte.weight[1:-1]  # (vocab_size-2, n_embd)
+            # Extract states for positions with valid labels
+            selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
+            # selected_states shape: (num_valid_labels, n_digit, n_embd)
+            
+            # Add time embedding to selected states
+            time_emb = self.time_embed(t).unsqueeze(1)  # (num_valid_labels, 1, n_embd)
+            selected_states = selected_states + time_emb  # Broadcast across n_digit dimension
+            
+            # Normalize states
+            selected_states_norm = F.normalize(selected_states, dim=-1)
+            
+            # Get token embeddings
+            token_emb = self.gpt2.wte.weight[1:-1]
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
@@ -244,8 +240,8 @@ class LLaDARecommender(AbstractModel):
             losses = []
             for i in range(self.n_pred_head):
                 # Compute logits for digit i
-                logits = torch.matmul(final_states_norm[:, i, :], token_embs[i].T) / self.temperature
-                # (batch_size, codebook_size)
+                logits = torch.matmul(selected_states_norm[:, i, :], token_embs[i].T) / self.temperature
+                # (num_valid_labels, codebook_size)
                 
                 # Get labels for digit i (adjust for token offset)
                 labels = target_codes[:, i] - i * self.config['codebook_size'] - 1
