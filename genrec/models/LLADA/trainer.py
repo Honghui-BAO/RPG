@@ -105,7 +105,12 @@ class LLADATrainer:
                 if self.accelerator.is_main_process:
                     for key in all_results:
                         self.accelerator.log({f"Val_Metric/{key}": all_results[key]}, step=epoch + 1)
+                    
+                    # Highlight code validity metrics
                     self.log(f'[Epoch {epoch + 1}] Val Results: {all_results}')
+                    self.log(f'[Epoch {epoch + 1}] Code Validity: '
+                            f'Exact Match={all_results["code_exact_match_rate"]:.4f}, '
+                            f'Avg Match={all_results["code_avg_max_match"]:.2f}/32')
                 val_score = all_results[self.config['val_metric']]
                 if val_score > best_val_score:
                     best_val_score = val_score
@@ -166,15 +171,17 @@ class LLADATrainer:
                     all_results[key].append(value)
 
         output_results = OrderedDict()
+        
+        # Add code validity metrics first (highlight them)
+        validity_summary = self.evaluator.get_validity_summary()
+        output_results['code_exact_match_rate'] = validity_summary['exact_match_rate']
+        output_results['code_avg_max_match'] = validity_summary['avg_max_matching_codes']
+        
+        # Then add standard metrics
         for metric in self.config['metrics']:
             for k in self.config['topk']:
                 key = f"{metric}@{k}"
                 output_results[key] = torch.cat(all_results[key]).mean().item()
-        
-        # Add code validity metrics
-        validity_summary = self.evaluator.get_validity_summary()
-        output_results['code_exact_match_rate'] = validity_summary['exact_match_rate']
-        output_results['code_avg_max_match'] = validity_summary['avg_max_matching_codes']
         
         return output_results
 
