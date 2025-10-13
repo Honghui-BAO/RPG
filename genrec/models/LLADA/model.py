@@ -260,17 +260,53 @@ class LLaDARecommender(AbstractModel):
         
         return outputs
 
+    def check_code_validity(self, codes: torch.Tensor) -> dict:
+        """
+        Check if generated codes match any real items
+        
+        Args:
+            codes: (batch_size, n_digit) generated semantic codes
+            
+        Returns:
+            dict with statistics about code validity
+        """
+        batch_size = codes.shape[0]
+        all_item_codes = self.item_id2tokens[1:]  # (n_items-1, n_digit)
+        
+        exact_matches = 0
+        max_matches = []
+        
+        for b in range(batch_size):
+            # Check if this code combination exists in item library
+            matches = (codes[b].unsqueeze(0) == all_item_codes).all(dim=1)
+            
+            if matches.any():
+                exact_matches += 1
+            
+            # Count maximum matching codes
+            num_matching_codes = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
+            max_matches.append(num_matching_codes.max().item())
+        
+        return {
+            'exact_match_rate': exact_matches / batch_size,
+            'avg_max_matching_codes': sum(max_matches) / len(max_matches),
+            'exact_matches': exact_matches,
+            'total': batch_size
+        }
+
     @torch.no_grad()
-    def generate(self, batch, n_return_sequences=1):
+    def generate(self, batch, n_return_sequences=1, return_codes=False):
         """
         Generate recommendations using iterative denoising
         
         Args:
             batch: dict with user history
             n_return_sequences: number of items to recommend
+            return_codes: if True, also return generated codes and validity stats
         
         Returns:
             predictions: (batch_size, n_return_sequences, 1)
+            or (predictions, generated_codes, validity_stats) if return_codes=True
         """
         batch_size = batch['input_ids'].shape[0]
         device = batch['input_ids'].device
@@ -287,10 +323,14 @@ class LLaDARecommender(AbstractModel):
         for t in reversed(range(1, self.T + 1)):
             # Construct input
             input_tokens = self.item_id2tokens[batch['input_ids']]
-            input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)
+            input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch, seq_len, n_embd)
             
-            target_embs = self.gpt2.wte(current_codes).mean(dim=-1, keepdim=True)
-            all_embs = torch.cat([input_embs, target_embs], dim=1)
+            # Get embeddings for current codes (each item has 32 codes)
+            # current_codes: (batch, 32)
+            # after embedding: (batch, 32, n_embd)  
+            # mean over 32 codes: (batch, n_embd)
+            target_embs = self.gpt2.wte(current_codes).mean(dim=1, keepdim=True)  # (batch, 1, n_embd)
+            all_embs = torch.cat([input_embs, target_embs], dim=1)  # (batch, seq_len+1, n_embd)
             
             # Add time embedding
             time_emb = self.time_embed(torch.full((batch_size,), t, device=device))
@@ -314,7 +354,8 @@ class LLaDARecommender(AbstractModel):
             
             # Get predictions for each digit
             final_states_norm = F.normalize(final_states, dim=-1)
-            token_emb_norm = F.normalize(self.gpt2.wte.weight[1:-1], dim=-1)
+            # Use correct token embedding range (exclude PAD, EOS, MASK)
+            token_emb_norm = F.normalize(self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']], dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
             predicted_codes = []
@@ -353,6 +394,11 @@ class LLaDARecommender(AbstractModel):
         # Convert codes to item IDs
         item_logits = self._codes_to_item_logits(current_codes)
         preds = item_logits.topk(n_return_sequences, dim=-1).indices + 1
+        
+        # Check code validity
+        if return_codes:
+            validity_stats = self.check_code_validity(current_codes)
+            return preds.unsqueeze(-1), current_codes, validity_stats
         
         return preds.unsqueeze(-1)
 
