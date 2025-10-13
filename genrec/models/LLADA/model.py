@@ -244,36 +244,21 @@ class LLaDARecommender(AbstractModel):
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
-            # Compute loss only on masked positions
+            # Compute loss (same as RPG, simplified for debugging)
+            selected_states_chunks = torch.chunk(selected_states_norm, self.n_pred_head, dim=1)
+            token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+            
             losses = []
             for i in range(self.n_pred_head):
                 # Compute logits for digit i
-                logits = torch.matmul(selected_states_norm[:, i, :], token_embs[i].T) / self.temperature
-                # (num_valid_labels, codebook_size=256)
+                logits = torch.matmul(selected_states_chunks[i].squeeze(dim=1), token_embs[i].T) / self.temperature
                 
-                # Get labels for digit i (adjust for token offset)
-                # target_codes are original semantic IDs (before masking)
-                labels = target_codes[:, i] - i * self.config['codebook_size'] - 1
+                # Get labels - exactly like RPG
+                labels = token_labels[:, i] - i * self.config['codebook_size'] - 1
                 
-                # Debug: check range
-                if i == 0 and (labels.min() < 0 or labels.max() >= self.config['codebook_size']):
-                    print(f"[DEBUG] Digit {i}: labels range [{labels.min().item()}, {labels.max().item()}]")
-                    print(f"[DEBUG] target_codes[:, {i}] range [{target_codes[:, i].min().item()}, {target_codes[:, i].max().item()}]")
-                    print(f"[DEBUG] Expected token range: [{i * self.config['codebook_size'] + 1}, {(i+1) * self.config['codebook_size']}]")
-                
-                # Clamp labels to ensure valid range [0, codebook_size-1]
-                labels = torch.clamp(labels, 0, self.config['codebook_size'] - 1)
-                
-                # Only compute loss for masked positions
-                masked_at_i = mask[:, i]
-                
-                if masked_at_i.any():
-                    loss_i = F.cross_entropy(
-                        logits[masked_at_i], 
-                        labels[masked_at_i],
-                        reduction='mean'
-                    )
-                    losses.append(loss_i)
+                # Compute loss
+                loss_i = self.loss_fct(logits, labels)
+                losses.append(loss_i)
             
             outputs.loss = torch.mean(torch.stack(losses)) if losses else torch.tensor(0.0, device=device)
         
