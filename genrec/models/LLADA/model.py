@@ -322,6 +322,10 @@ class LLaDARecommender(AbstractModel):
         
         # Iterative denoising from t=T to t=1
         for t in reversed(range(1, self.T + 1)):
+            # Early stopping: if all codes are determined, stop iterating
+            if (current_codes != self.mask_token_id).all():
+                break
+            
             # Construct input
             input_tokens = self.item_id2tokens[batch['input_ids']]
             input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch, seq_len, n_embd)
