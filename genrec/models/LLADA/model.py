@@ -199,16 +199,10 @@ class LLaDARecommender(AbstractModel):
         # Get target item codes for valid labels
         target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
         
-        # Ensure target_codes are in valid range
-        # Each digit i should have codes in [1 + i*codebook_size, (i+1)*codebook_size]
-        for i in range(self.n_pred_head):
-            min_val = i * self.config['codebook_size'] + 1
-            max_val = (i + 1) * self.config['codebook_size']
-            # Clamp to ensure valid range
-            target_codes[:, i] = torch.clamp(target_codes[:, i], min_val, max_val)
-        
+        # TODO: Enable forward diffusion after basic training works
         # Forward diffusion: mask some codes
-        masked_codes, mask = self.forward_diffusion(target_codes, t)
+        # masked_codes, mask = self.forward_diffusion(target_codes, t)
+        # For now, skip masking to debug
         
         # For LLADA, we use the same architecture as RPG but predict masked tokens
         # Get embeddings for history items
