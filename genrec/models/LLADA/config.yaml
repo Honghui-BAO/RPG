@@ -4,6 +4,10 @@
 # Overwriting configs
 metadata: sentence
 
+# Batch sizes (larger eval batch for faster inference)
+train_batch_size: 256
+eval_batch_size: 128  # Increased from default 32 for faster evaluation
+
 # Config the sentence embedding model
 #   Sentence T5
 sent_emb_model: sentence-transformers/sentence-t5-base
@@ -43,6 +47,12 @@ mask_schedule: linear  # Masking schedule: linear, cosine, square
 codes_per_step: 8  # Number of codes to determine per step (faster inference)
                    # If set to null, uses schedule-based approach
                    # Recommended: 4-8 for fast inference, null for quality
+
+# Code to item mapping method
+code_to_item_method: count  # How to map generated codes to items
+                            # 'count': Count matching codes (fast, simple)
+                            # 'embedding': Use embedding similarity (robust to mismatches)
+                            # 'hybrid': Combine both (best quality, slower)
 
 # Model-specific configs
 temperature: 0.07

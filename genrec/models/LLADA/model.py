@@ -406,7 +406,8 @@ class LLaDARecommender(AbstractModel):
                 current_codes = predicted_codes
         
         # Convert codes to item IDs
-        item_logits = self._codes_to_item_logits(current_codes)
+        mapping_method = self.config.get('code_to_item_method', 'count')
+        item_logits = self._codes_to_item_logits(current_codes, method=mapping_method)
         preds = item_logits.topk(n_return_sequences, dim=-1).indices + 1
         
         # Check code validity
@@ -416,28 +417,55 @@ class LLaDARecommender(AbstractModel):
         
         return preds.unsqueeze(-1)
 
-    def _codes_to_item_logits(self, codes: torch.Tensor) -> torch.Tensor:
+    def _codes_to_item_logits(self, codes: torch.Tensor, method='count') -> torch.Tensor:
         """
         Convert semantic codes to item logits
         
         Args:
             codes: (batch_size, n_digit) semantic codes
+            method: 'count', 'embedding', or 'hybrid'
         
         Returns:
             item_logits: (batch_size, n_items) logits for each item
         """
         batch_size = codes.shape[0]
-        
-        # Compute similarity between predicted codes and all item codes
-        # Simple approach: count matching codes
         all_item_codes = self.item_id2tokens[1:]  # (n_items-1, n_digit)
         
-        item_logits = torch.zeros(batch_size, self.dataset.n_items - 1, device=codes.device)
+        if method == 'count':
+            # Method 1: Count matching codes (simple, current default)
+            item_logits = torch.zeros(batch_size, self.dataset.n_items - 1, device=codes.device)
+            for b in range(batch_size):
+                matches = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
+                item_logits[b] = matches.float()
         
-        for b in range(batch_size):
-            # Count matches
-            matches = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
-            item_logits[b] = matches.float()
+        elif method == 'embedding':
+            # Method 2: Use embedding similarity (more robust to mismatches)
+            # Convert codes to embeddings
+            code_embs = self.gpt2.wte(codes).mean(dim=1)  # (batch, n_embd)
+            all_item_embs = self.gpt2.wte(all_item_codes).mean(dim=1)  # (n_items-1, n_embd)
+            
+            # Cosine similarity
+            code_embs_norm = F.normalize(code_embs, dim=-1)
+            all_item_embs_norm = F.normalize(all_item_embs, dim=-1)
+            item_logits = torch.matmul(code_embs_norm, all_item_embs_norm.T)  # (batch, n_items-1)
+        
+        elif method == 'hybrid':
+            # Method 3: Combine count and embedding (best of both)
+            # First use count to filter top candidates
+            matches_logits = torch.zeros(batch_size, self.dataset.n_items - 1, device=codes.device)
+            for b in range(batch_size):
+                matches = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
+                matches_logits[b] = matches.float()
+            
+            # Then use embedding for final ranking among top candidates
+            code_embs = self.gpt2.wte(codes).mean(dim=1)
+            all_item_embs = self.gpt2.wte(all_item_codes).mean(dim=1)
+            code_embs_norm = F.normalize(code_embs, dim=-1)
+            all_item_embs_norm = F.normalize(all_item_embs, dim=-1)
+            emb_logits = torch.matmul(code_embs_norm, all_item_embs_norm.T)
+            
+            # Weighted combination
+            item_logits = 0.7 * matches_logits + 0.3 * emb_logits * 32  # Scale emb to same range
         
         return item_logits
 

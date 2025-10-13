@@ -18,5 +18,6 @@ CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --diffusion_steps=32 \
     --mask_schedule=linear \
     --codes_per_step=16 \
+    --eval_batch_size=256 \
     --epochs=150
 
