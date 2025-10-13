@@ -249,17 +249,23 @@ class LLaDARecommender(AbstractModel):
             for i in range(self.n_pred_head):
                 # Compute logits for digit i
                 logits = torch.matmul(selected_states_norm[:, i, :], token_embs[i].T) / self.temperature
-                # (num_valid_labels, codebook_size)
+                # (num_valid_labels, codebook_size=256)
                 
                 # Get labels for digit i (adjust for token offset)
                 # target_codes are original semantic IDs (before masking)
                 labels = target_codes[:, i] - i * self.config['codebook_size'] - 1
                 
-                # Ensure labels are in valid range [0, codebook_size-1]
-                valid_label_mask = (labels >= 0) & (labels < self.config['codebook_size'])
+                # Debug: check range
+                if i == 0 and (labels.min() < 0 or labels.max() >= self.config['codebook_size']):
+                    print(f"[DEBUG] Digit {i}: labels range [{labels.min().item()}, {labels.max().item()}]")
+                    print(f"[DEBUG] target_codes[:, {i}] range [{target_codes[:, i].min().item()}, {target_codes[:, i].max().item()}]")
+                    print(f"[DEBUG] Expected token range: [{i * self.config['codebook_size'] + 1}, {(i+1) * self.config['codebook_size']}]")
                 
-                # Only compute loss for masked positions with valid labels
-                masked_at_i = mask[:, i] & valid_label_mask
+                # Clamp labels to ensure valid range [0, codebook_size-1]
+                labels = torch.clamp(labels, 0, self.config['codebook_size'] - 1)
+                
+                # Only compute loss for masked positions
+                masked_at_i = mask[:, i]
                 
                 if masked_at_i.any():
                     loss_i = F.cross_entropy(
