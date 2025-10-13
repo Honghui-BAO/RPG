@@ -233,8 +233,10 @@ class LLaDARecommender(AbstractModel):
             # Normalize states
             selected_states_norm = F.normalize(selected_states, dim=-1)
             
-            # Get token embeddings
-            token_emb = self.gpt2.wte.weight[1:-1]
+            # Get token embeddings (exclude PAD, EOS, and MASK)
+            # For LLADA: vocab is [PAD, codes_1-8192, EOS, MASK]
+            # We only want codes_1-8192 (the 32*256=8192 semantic tokens)
+            token_emb = self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']]  # [1:8193]
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
