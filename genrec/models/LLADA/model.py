@@ -61,6 +61,7 @@ class LLaDARecommender(AbstractModel):
         # Diffusion parameters
         self.T = config.get('diffusion_steps', 32)  # Total diffusion steps
         self.mask_schedule = config.get('mask_schedule', 'linear')  # linear, cosine, square
+        self.codes_per_step = config.get('codes_per_step', None)  # If set, determine this many codes per step
         
         # Special tokens
         self.mask_token_id = tokenizer.mask_token_id
@@ -377,16 +378,25 @@ class LLaDARecommender(AbstractModel):
             
             # Update strategy: keep high-confidence predictions
             if t > 1:
-                mask_ratio = self.get_mask_ratio(t - 1)
-                num_to_keep = int(self.n_pred_head * (1 - mask_ratio))
+                if self.codes_per_step is not None:
+                    # Fixed number of codes per step (faster)
+                    # Calculate how many codes to keep in total
+                    steps_done = self.T - t + 1  # How many steps we've done
+                    num_to_keep = min(steps_done * self.codes_per_step, self.n_pred_head)
+                else:
+                    # Original schedule-based approach
+                    mask_ratio = self.get_mask_ratio(t - 1)
+                    num_to_keep = int(self.n_pred_head * (1 - mask_ratio))
                 
                 # Keep top-k confident predictions
                 _, top_k_indices = confidence_scores.topk(num_to_keep, dim=1)
                 
-                # Update current_codes
+                # Update current_codes (only change positions that are still MASK)
                 for b in range(batch_size):
                     for idx in top_k_indices[b]:
-                        current_codes[b, idx] = predicted_codes[b, idx]
+                        # Only update if it's currently MASK (don't overwrite previous decisions)
+                        if current_codes[b, idx] == self.mask_token_id:
+                            current_codes[b, idx] = predicted_codes[b, idx]
             else:
                 # Last step: use all predictions
                 current_codes = predicted_codes

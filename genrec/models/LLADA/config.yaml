@@ -40,6 +40,9 @@ faiss_omp_num_threads: 32
 # LLaDA-specific: Diffusion parameters
 diffusion_steps: 32  # Total timesteps for diffusion (T)
 mask_schedule: linear  # Masking schedule: linear, cosine, square
+codes_per_step: 8  # Number of codes to determine per step (faster inference)
+                   # If set to null, uses schedule-based approach
+                   # Recommended: 4-8 for fast inference, null for quality
 
 # Model-specific configs
 temperature: 0.07
