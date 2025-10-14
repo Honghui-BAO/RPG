@@ -108,9 +108,10 @@ class LLADATrainer:
                     
                     # Highlight code validity metrics
                     self.log(f'[Epoch {epoch + 1}] Val Results: {all_results}')
+                    n_codes = self.config.get('n_codebook', 32)  # Get actual number of codes
                     self.log(f'[Epoch {epoch + 1}] Code Validity: '
                             f'Exact Match={all_results["code_exact_match_rate"]:.4f}, '
-                            f'Avg Match={all_results["code_avg_max_match"]:.2f}/32')
+                            f'Avg Match={all_results["code_avg_max_match"]:.2f}/{n_codes}')
                 val_score = all_results[self.config['val_metric']]
                 if val_score > best_val_score:
                     best_val_score = val_score
