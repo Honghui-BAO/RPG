@@ -257,7 +257,14 @@ class LLaDARecommender(AbstractModel):
             
             # Compute loss (same as RPG, simplified for debugging)
             selected_states_chunks = torch.chunk(selected_states_norm, self.n_pred_head, dim=1)
-            token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+            
+            # Get token labels (need to match expanded target_codes)
+            if num_timesteps > 1:
+                # Expand valid_labels to match target_codes
+                valid_labels_expanded = valid_labels.repeat_interleave(num_timesteps)
+                token_labels = self.item_id2tokens[valid_labels_expanded]  # (num_valid_labels * num_timesteps, n_digit)
+            else:
+                token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
             
             losses = []
             for i in range(self.n_pred_head):
