@@ -34,26 +34,26 @@ attn_pdrop: 0.5
 layer_norm_epsilon: 1e-12
 initializer_range: 0.02
 
-# Semantic ID configs - Using 8 codes instead of 32 (faster, smaller space)
-n_codebook: 8  # Changed from 32 to 8
+# Semantic ID configs - Using 4 codes (extreme speed, minimal representation)
+n_codebook: 4  # Changed from 32 to 4
 codebook_size: 256
 opq_use_gpu: False
 opq_gpu_id: 0
 faiss_omp_num_threads: 32
 
 # LLaDA-specific: Diffusion parameters
-diffusion_steps: 8  # Total timesteps for diffusion (T) - matched with n_codebook
+diffusion_steps: 4  # Total timesteps for diffusion (T) - matched with n_codebook
 mask_schedule: linear  # Masking schedule: linear, cosine, square
-codes_per_step: 4  # Number of codes to determine per step (2 steps total: 8/4=2)
+codes_per_step: 2  # Number of codes to determine per step (2 steps total: 4/2=2)
                    # If set to null, uses schedule-based approach
-                   # Recommended: 2-4 for fast inference with 8 codes
+                   # With 4 codes: only 2 steps needed!
 
 # Code to item mapping method
-code_to_item_method: hybrid  # For len8, use hybrid for better discrimination
-                             # With 8 codes, count has only 9 levels - too coarse
-                             # 'count': OK for 16+ codes
-                             # 'embedding': Good for 4-8 codes  
-                             # 'hybrid': RECOMMENDED for 8 codes
+code_to_item_method: embedding  # For len4, MUST use embedding
+                                # With 4 codes, count has only 5 levels - way too coarse
+                                # 'count': NOT recommended for <16 codes
+                                # 'embedding': REQUIRED for 4 codes
+                                # 'hybrid': Also good for 4 codes
 
 # Model-specific configs
 temperature: 0.07
