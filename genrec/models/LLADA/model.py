@@ -19,7 +19,7 @@ Key differences from autoregressive RPG:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2Config, GPT2Model
+from transformers import BertConfig, BertModel
 import numpy as np
 
 from genrec.dataset import AbstractDataset
@@ -66,23 +66,21 @@ class LLaDARecommender(AbstractModel):
         # Special tokens
         self.mask_token_id = tokenizer.mask_token_id
         
-        # GPT2 backbone
-        gpt2config = GPT2Config(
+        # BERT backbone (bidirectional attention for better sequence understanding)
+        bert_config = BertConfig(
             vocab_size=tokenizer.vocab_size,
-            n_positions=tokenizer.max_token_seq_len + 1,  # +1 for target item
-            n_embd=config['n_embd'],
-            n_layer=config['n_layer'],
-            n_head=config['n_head'],
-            n_inner=config['n_inner'],
-            activation_function=config['activation_function'],
-            resid_pdrop=config['resid_pdrop'],
-            embd_pdrop=config['embd_pdrop'],
-            attn_pdrop=config['attn_pdrop'],
-            layer_norm_epsilon=config['layer_norm_epsilon'],
+            max_position_embeddings=tokenizer.max_token_seq_len + 1,
+            hidden_size=config['n_embd'],
+            num_hidden_layers=config['n_layer'],
+            num_attention_heads=config['n_head'],
+            intermediate_size=config['n_inner'],
+            hidden_act=config['activation_function'],
+            hidden_dropout_prob=config['embd_pdrop'],
+            attention_probs_dropout_prob=config['attn_pdrop'],
+            layer_norm_eps=config['layer_norm_epsilon'],
             initializer_range=config['initializer_range'],
-            eos_token_id=tokenizer.eos_token,
         )
-        self.gpt2 = GPT2Model(gpt2config)
+        self.encoder = BertModel(bert_config)
         
         # Time step embedding
         self.time_embed = nn.Embedding(self.T + 1, config['n_embd'])
@@ -117,7 +115,7 @@ class LLaDARecommender(AbstractModel):
     @property
     def n_parameters(self) -> str:
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        emb_params = sum(p.numel() for p in self.gpt2.get_input_embeddings().parameters())
+        emb_params = sum(p.numel() for p in self.encoder.get_input_embeddings().parameters())
         time_emb_params = sum(p.numel() for p in self.time_embed.parameters())
         return f'#Embedding parameters: {emb_params}\n' \
                f'#Time embedding parameters: {time_emb_params}\n' \
@@ -208,10 +206,10 @@ class LLaDARecommender(AbstractModel):
         # For LLADA, we use the same architecture as RPG but predict masked tokens
         # Get embeddings for history items
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
-        input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
+        input_embs = self.encoder.embeddings.word_embeddings(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
         
-        # Pass through GPT2
-        outputs = self.gpt2(
+        # Pass through BERT (bidirectional attention - better for recommendation)
+        outputs = self.encoder(
             inputs_embeds=input_embs,
             attention_mask=batch['attention_mask']
         )
@@ -237,7 +235,7 @@ class LLaDARecommender(AbstractModel):
             # Get token embeddings (exclude PAD, EOS, and MASK)
             # For LLADA: vocab is [PAD, codes_1-8192, EOS, MASK]
             # We only want codes_1-8192 (the 32*256=8192 semantic tokens)
-            token_emb = self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']]  # [1:8193]
+            token_emb = self.encoder.embeddings.word_embeddings.weight[1:1+self.n_pred_head*self.config['codebook_size']]
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
@@ -328,13 +326,13 @@ class LLaDARecommender(AbstractModel):
             
             # Construct input
             input_tokens = self.item_id2tokens[batch['input_ids']]
-            input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch, seq_len, n_embd)
+            input_embs = self.encoder.embeddings.word_embeddings(input_tokens).mean(dim=-2)  # (batch, seq_len, n_embd)
             
             # Get embeddings for current codes (each item has 32 codes)
             # current_codes: (batch, 32)
             # after embedding: (batch, 32, n_embd)  
             # mean over 32 codes: (batch, n_embd)
-            target_embs = self.gpt2.wte(current_codes).mean(dim=1, keepdim=True)  # (batch, 1, n_embd)
+            target_embs = self.encoder.embeddings.word_embeddings(current_codes).mean(dim=1, keepdim=True)  # (batch, 1, n_embd)
             all_embs = torch.cat([input_embs, target_embs], dim=1)  # (batch, seq_len+1, n_embd)
             
             # Add time embedding
@@ -347,8 +345,8 @@ class LLaDARecommender(AbstractModel):
                 torch.ones(batch_size, 1, device=device, dtype=batch['attention_mask'].dtype)
             ], dim=1)
             
-            # Forward
-            outputs = self.gpt2(inputs_embeds=all_embs, attention_mask=attention_mask_extended)
+            # Forward through BERT
+            outputs = self.encoder(inputs_embeds=all_embs, attention_mask=attention_mask_extended)
             target_hidden = outputs.last_hidden_state[:, -1, :]
             
             # Predict codes
@@ -360,7 +358,7 @@ class LLaDARecommender(AbstractModel):
             # Get predictions for each digit
             final_states_norm = F.normalize(final_states, dim=-1)
             # Use correct token embedding range (exclude PAD, EOS, MASK)
-            token_emb_norm = F.normalize(self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']], dim=-1)
+            token_emb_norm = F.normalize(self.encoder.embeddings.word_embeddings.weight[1:1+self.n_pred_head*self.config['codebook_size']], dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
             predicted_codes = []
@@ -441,8 +439,8 @@ class LLaDARecommender(AbstractModel):
         elif method == 'embedding':
             # Method 2: Use embedding similarity (more robust to mismatches)
             # Convert codes to embeddings
-            code_embs = self.gpt2.wte(codes).mean(dim=1)  # (batch, n_embd)
-            all_item_embs = self.gpt2.wte(all_item_codes).mean(dim=1)  # (n_items-1, n_embd)
+            code_embs = self.encoder.embeddings.word_embeddings(codes).mean(dim=1)  # (batch, n_embd)
+            all_item_embs = self.encoder.embeddings.word_embeddings(all_item_codes).mean(dim=1)  # (n_items-1, n_embd)
             
             # Cosine similarity
             code_embs_norm = F.normalize(code_embs, dim=-1)
@@ -458,8 +456,8 @@ class LLaDARecommender(AbstractModel):
                 matches_logits[b] = matches.float()
             
             # Then use embedding for final ranking among top candidates
-            code_embs = self.gpt2.wte(codes).mean(dim=1)
-            all_item_embs = self.gpt2.wte(all_item_codes).mean(dim=1)
+            code_embs = self.encoder.embeddings.word_embeddings(codes).mean(dim=1)
+            all_item_embs = self.encoder.embeddings.word_embeddings(all_item_codes).mean(dim=1)
             code_embs_norm = F.normalize(code_embs, dim=-1)
             all_item_embs_norm = F.normalize(all_item_embs, dim=-1)
             emb_logits = torch.matmul(code_embs_norm, all_item_embs_norm.T)
