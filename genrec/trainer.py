@@ -178,7 +178,12 @@ class Trainer:
                     results = self.evaluator.calculate_metrics(all_preds, all_labels)
                 else:
                     preds = self.model.generate(batch, n_return_sequences=self.evaluator.maxk)
-                    results = self.evaluator.calculate_metrics(preds, batch['labels'])
+                    if isinstance(preds, tuple):
+                        # Handle tuple return (preds, n_visited_items)
+                        results = self.evaluator.calculate_metrics(preds, batch['labels'])
+                    else:
+                        # Handle single return (backward compatibility)
+                        results = self.evaluator.calculate_metrics(preds, batch['labels'])
 
                 for key, value in results.items():
                     all_results[key].append(value)

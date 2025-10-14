@@ -300,10 +300,16 @@ class RPG(AbstractModel):
             )
             return outputs
         else:
+            # Direct embedding matching - compute logits for all items
+            batch_size = token_logits.shape[0]
             item_logits = torch.gather(
                 input=token_logits.unsqueeze(-2).expand(-1, self.dataset.n_items, -1),              # (batch_size, n_items, n_tokens)
                 dim=-1,
                 index=(self.item_id2tokens[1:,:] - 1).unsqueeze(0).expand(token_logits.shape[0], -1, -1)  # (batch_size, n_items, code_dim)
             ).mean(dim=-1)
             preds = item_logits.topk(n_return_sequences, dim=-1).indices + 1
-            return preds.unsqueeze(-1)
+            
+            # Return n_visited_items count (all items in direct matching)
+            n_visited_items = torch.FloatTensor([[self.dataset.n_items - 1]] * batch_size)
+            
+            return preds.unsqueeze(-1), n_visited_items
