@@ -17,8 +17,13 @@ def parse_args():
     parser.add_argument('--model', type=str, default='RPG', help='Model name')
     parser.add_argument('--dataset', type=str, default='AmazonReviews2014', help='Dataset name')
     parser.add_argument('--checkpoint', type=str, required=True, help='Checkpoint path')
-    parser.add_argument('--use_graph', action='store_true', help='Use graph-constrained decoding')
+    parser.add_argument('--infer_mode', type=str, default='direct', 
+                        choices=['direct', 'graph', 'overlap'],
+                        help='Inference mode: direct (embedding matching), graph (graph-constrained), overlap (token overlap counting)')
     parser.add_argument('--split', type=str, default='test', choices=['val', 'test'], help='Which split to evaluate')
+    
+    # Deprecated flag for backward compatibility
+    parser.add_argument('--use_graph', action='store_true', help='[Deprecated] Use --infer_mode=graph instead')
     return parser.parse_known_args()
 
 
@@ -48,12 +53,27 @@ if __name__ == '__main__':
         pipeline.model, dataloader
     )
     
-    # Set inference mode
-    pipeline.trainer.model.generate_w_decoding_graph = args.use_graph
+    # Set inference mode (handle backward compatibility)
+    if args.use_graph:
+        pipeline.log('[Warning] --use_graph is deprecated. Use --infer_mode=graph instead.')
+        infer_mode = 'graph'
+    else:
+        infer_mode = args.infer_mode
+    
+    # Configure model based on inference mode
+    if infer_mode == 'graph':
+        pipeline.trainer.model.generate_w_decoding_graph = True
+        pipeline.trainer.model.use_token_overlap = False
+    elif infer_mode == 'overlap':
+        pipeline.trainer.model.generate_w_decoding_graph = False
+        pipeline.trainer.model.use_token_overlap = True
+    else:  # 'direct'
+        pipeline.trainer.model.generate_w_decoding_graph = False
+        pipeline.trainer.model.use_token_overlap = False
     
     # Run evaluation
     pipeline.log(f'Running inference on {split} set...')
-    pipeline.log(f'Using graph-constrained decoding: {args.use_graph}')
+    pipeline.log(f'Inference mode: {infer_mode}')
     
     results = pipeline.trainer.evaluate(dataloader, split=split)
     

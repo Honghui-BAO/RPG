@@ -91,6 +91,9 @@ class RPG(AbstractModel):
         self.num_beams = config['num_beams']
         self.n_edges = config['n_edges']
         self.propagation_steps = config['propagation_steps']
+        
+        # Token overlap counting inference
+        self.use_token_overlap = False
 
     def _map_item_tokens(self) -> torch.Tensor:
         """
@@ -299,6 +302,51 @@ class RPG(AbstractModel):
                 n_return_sequences=n_return_sequences
             )
             return outputs
+        elif self.use_token_overlap:
+            # Token overlap counting: generate tokens and count overlaps with corpus
+            batch_size = token_logits.shape[0]
+            
+            # Step 1: Generate tokens by selecting top-1 for each codebook
+            # Split logits by codebook
+            logits_by_head = torch.split(token_logits, self.config['codebook_size'], dim=-1)
+            
+            # Select top-1 token for each codebook (batch_size, n_codebook)
+            generated_tokens = []
+            for head_idx, head_logits in enumerate(logits_by_head):
+                # Get the index of top-1 token (0-255) and convert to global token id
+                top_token_idx = head_logits.argmax(dim=-1)  # (batch_size,)
+                # Convert to global token id: add offset for this codebook
+                global_token_id = top_token_idx + head_idx * self.config['codebook_size'] + 1
+                generated_tokens.append(global_token_id)
+            
+            generated_tokens = torch.stack(generated_tokens, dim=-1)  # (batch_size, n_codebook)
+            
+            # Step 2: Count overlaps with all items in corpus
+            # item_id2tokens: (n_items, n_codebook)
+            # generated_tokens: (batch_size, n_codebook)
+            
+            overlap_counts = []
+            for batch_idx in range(batch_size):
+                gen_tokens = generated_tokens[batch_idx]  # (n_codebook,)
+                
+                # Compare with all items (vectorized)
+                # Expand gen_tokens to (n_items, n_codebook)
+                gen_tokens_expanded = gen_tokens.unsqueeze(0).expand(self.dataset.n_items, -1)
+                
+                # Count matches for each item
+                matches = (self.item_id2tokens == gen_tokens_expanded).sum(dim=-1)  # (n_items,)
+                overlap_counts.append(matches)
+            
+            overlap_counts = torch.stack(overlap_counts, dim=0)  # (batch_size, n_items)
+            
+            # Step 3: Select top-k items by overlap count
+            # Note: item_id2tokens is 0-indexed, so we need to add 1 for actual item ids
+            preds = overlap_counts[:, 1:].topk(n_return_sequences, dim=-1).indices + 1  # Skip padding item 0
+            
+            # Return n_visited_items count (all items in overlap counting)
+            n_visited_items = torch.FloatTensor([[self.dataset.n_items - 1]] * batch_size)
+            
+            return preds.unsqueeze(-1), n_visited_items
         else:
             # Direct embedding matching - compute logits for all items
             batch_size = token_logits.shape[0]

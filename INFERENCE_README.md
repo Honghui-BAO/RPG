@@ -6,6 +6,7 @@ This branch (`rpg_infer`) provides flexible inference options for the RPG model 
 
 - **Direct Embedding Matching**: Fast inference by computing scores for all items using token embeddings
 - **Graph-Constrained Decoding**: Efficient search using pre-computed item similarity graph
+- **Token Overlap Counting**: Generate discrete tokens and match by counting overlaps with corpus items
 - **Item Visit Statistics**: Track the number of items visited during inference
 
 ## Usage
@@ -14,20 +15,32 @@ This branch (`rpg_infer`) provides flexible inference options for the RPG model 
 
 ```bash
 # Using the convenience script
-bash run_infer.sh <checkpoint_path> <category>
+bash run_infer.sh <checkpoint_path> <category> direct
 
 # Example
+bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors direct
+# Or simply (direct is default)
 bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors
+```
+
+### Token Overlap Counting Inference (NEW!)
+
+```bash
+# Using the convenience script with overlap mode
+bash run_infer.sh <checkpoint_path> <category> overlap
+
+# Example
+bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors overlap
 ```
 
 ### Graph-Based Inference
 
 ```bash
 # Using the convenience script with graph mode
-bash run_infer.sh <checkpoint_path> <category> --use_graph
+bash run_infer.sh <checkpoint_path> <category> graph
 
 # Example
-bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors --use_graph
+bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors graph
 ```
 
 ### Advanced Usage (Direct Python Call)
@@ -37,34 +50,55 @@ bash run_infer.sh ckpt/RPG_Sports_and_Outdoors.pth Sports_and_Outdoors --use_gra
 CUDA_VISIBLE_DEVICES=0 python infer.py \
     --checkpoint=ckpt/RPG.pth \
     --category=Sports_and_Outdoors \
-    --split=test
+    --split=test \
+    --infer_mode=direct
+
+# Token overlap counting
+CUDA_VISIBLE_DEVICES=0 python infer.py \
+    --checkpoint=ckpt/RPG.pth \
+    --category=Sports_and_Outdoors \
+    --split=test \
+    --infer_mode=overlap
 
 # Graph-constrained decoding
 CUDA_VISIBLE_DEVICES=0 python infer.py \
     --checkpoint=ckpt/RPG.pth \
     --category=Sports_and_Outdoors \
     --split=test \
-    --use_graph
+    --infer_mode=graph
 
 # Inference on validation set
 CUDA_VISIBLE_DEVICES=0 python infer.py \
     --checkpoint=ckpt/RPG.pth \
     --category=Beauty \
-    --split=val
+    --split=val \
+    --infer_mode=overlap
 ```
 
 ## Inference Strategies Comparison
 
-### 1. Direct Embedding Matching (Default)
-- **Speed**: Very fast (single forward pass)
+### 1. Direct Embedding Matching (--infer_mode=direct, default)
+- **Method**: Compute weighted average of token logits for each item
+- **Speed**: Very fast (single forward pass + gather operation)
 - **Items Visited**: All items in the catalog
 - **Memory**: O(n_items × n_tokens)
-- **Best for**: Small to medium catalogs, when you need exhaustive search
+- **Characteristics**: Soft matching using continuous logits
+- **Best for**: Small to medium catalogs, when you need exhaustive search with probabilistic ranking
 
-### 2. Graph-Constrained Decoding (--use_graph)
+### 2. Token Overlap Counting (--infer_mode=overlap, NEW!)
+- **Method**: Generate discrete tokens (argmax per codebook), count exact matches with items
+- **Speed**: Very fast (single forward pass + vectorized comparison)
+- **Items Visited**: All items in the catalog
+- **Memory**: O(n_items × n_codebook)
+- **Characteristics**: Hard matching using discrete tokens, interpretable overlap counts
+- **Best for**: When you want discrete token generation behavior, easier debugging/analysis
+- **Note**: Selects top-1 token per codebook (greedy), then matches with corpus
+
+### 3. Graph-Constrained Decoding (--infer_mode=graph)
 - **Speed**: Slower (graph propagation steps)
 - **Items Visited**: Only graph neighbors (much fewer)
 - **Memory**: O(num_beams × propagation_steps × n_edges)
+- **Characteristics**: Explores item space via similarity graph
 - **Best for**: Large catalogs, when you want to reduce computation
 
 ## Output Metrics

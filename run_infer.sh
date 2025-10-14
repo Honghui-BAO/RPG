@@ -1,28 +1,21 @@
 #!/bin/bash
 
 # Inference script for RPG model
-# Usage: bash run_infer.sh <checkpoint_path> [options]
+# Usage: bash run_infer.sh <checkpoint_path> <category> [infer_mode]
+# infer_mode: direct (default), graph, overlap
 
 CHECKPOINT=${1:-"ckpt/RPG.pth"}
 CATEGORY=${2:-"Sports_and_Outdoors"}
-USE_GRAPH=${3:-""}  # Leave empty for direct embedding matching, set to "--use_graph" for graph-based
+INFER_MODE=${3:-"direct"}  # direct, graph, or overlap
 
 echo "Running inference..."
 echo "Checkpoint: $CHECKPOINT"
 echo "Category: $CATEGORY"
+echo "Inference Mode: $INFER_MODE"
 
-if [ -z "$USE_GRAPH" ]; then
-    echo "Mode: Direct Embedding Matching"
-    CUDA_VISIBLE_DEVICES=0 python infer.py \
-        --checkpoint=$CHECKPOINT \
-        --category=$CATEGORY \
-        --split=test
-else
-    echo "Mode: Graph-Constrained Decoding"
-    CUDA_VISIBLE_DEVICES=0 python infer.py \
-        --checkpoint=$CHECKPOINT \
-        --category=$CATEGORY \
-        --split=test \
-        --use_graph
-fi
+CUDA_VISIBLE_DEVICES=0 python infer.py \
+    --checkpoint=$CHECKPOINT \
+    --category=$CATEGORY \
+    --split=test \
+    --infer_mode=$INFER_MODE
 
