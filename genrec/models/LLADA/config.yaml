@@ -3,6 +3,7 @@
 
 # Overwriting configs
 metadata: sentence
+run_id: llada_multi  # Short run ID to avoid filename length issues
 
 # Batch sizes (larger eval batch for faster inference)
 train_batch_size: 256
