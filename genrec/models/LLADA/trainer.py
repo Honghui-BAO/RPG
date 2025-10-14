@@ -37,10 +37,15 @@ class LLADATrainer:
         self.evaluator = LLaDAEvaluator(config, tokenizer)
         self.logger = getLogger()
 
-        self.saved_model_ckpt = os.path.join(
-            self.config['ckpt_dir'],
-            get_file_name(self.config, suffix='.pth')
-        )
+        # Use simplified filename to avoid "filename too long" error
+        import hashlib
+        import datetime
+        config_str = f"{self.config.get('run_id', 'llada')}_{self.config.get('n_codebook', 32)}"
+        timestamp = datetime.datetime.now().strftime("%b-%d-%Y_%H-%M")
+        md5 = hashlib.md5(str(self.config).encode()).hexdigest()[:6]
+        filename = f"{config_str}-{timestamp}-{md5}.pth"
+        
+        self.saved_model_ckpt = os.path.join(self.config['ckpt_dir'], filename)
         os.makedirs(os.path.dirname(self.saved_model_ckpt), exist_ok=True)
 
     def fit(self, train_dataloader, val_dataloader):
@@ -66,8 +71,10 @@ class LLADATrainer:
         self.model, optimizer, train_dataloader, val_dataloader, scheduler = self.accelerator.prepare(
             self.model, optimizer, train_dataloader, val_dataloader, scheduler
         )
+        # Use simplified project name for tensorboard
+        project_name = f"{self.config.get('run_id', 'llada')}_{self.config.get('n_codebook', 32)}"
         self.accelerator.init_trackers(
-            project_name=get_file_name(self.config, suffix=''),
+            project_name=project_name,
             config=config_for_log(self.config),
             init_kwargs={"tensorboard": {"flush_secs": 60}},
         )
