@@ -49,11 +49,11 @@ codes_per_step: 4  # Number of codes to determine per step (2 steps total: 8/4=2
                    # Recommended: 2-4 for fast inference with 8 codes
 
 # Code to item mapping method
-code_to_item_method: hybrid  # For len8, use hybrid for better discrimination
-                             # With 8 codes, count has only 9 levels - too coarse
-                             # 'count': OK for 16+ codes
-                             # 'embedding': Good for 4-8 codes  
-                             # 'hybrid': RECOMMENDED for 8 codes
+code_to_item_method: embedding  # For len4, MUST use embedding
+                                # With 4 codes, count has only 5 levels - way too coarse
+                                # 'count': NOT recommended for <16 codes
+                                # 'embedding': REQUIRED for 4 codes
+                                # 'hybrid': Also good for 4 codes
 
 # Model-specific configs
 temperature: 0.07

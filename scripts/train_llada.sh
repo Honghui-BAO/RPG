@@ -17,7 +17,7 @@ CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --diffusion_steps=8 \
     --mask_schedule=linear \
     --codes_per_step=4 \
-    --code_to_item_method=hybrid \
+    --code_to_item_method=embedding \
     --eval_batch_size=128 \
     --epochs=150
 
