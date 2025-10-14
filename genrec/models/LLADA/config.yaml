@@ -48,6 +48,12 @@ codes_per_step: 8  # Number of codes to determine per step (faster inference)
                    # If set to null, uses schedule-based approach
                    # Recommended: 4-8 for fast inference, null for quality
 
+# Training strategy
+train_timesteps_per_sample: 4  # Number of timesteps to sample per training sample
+                               # 1: original (random single t)
+                               # 4-8: sample multiple t per sample (richer training signal)
+                               # 32: use all timesteps (slowest but most thorough)
+
 # Code to item mapping method
 code_to_item_method: count  # How to map generated codes to items
                             # 'count': Count matching codes (fast, simple)

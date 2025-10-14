@@ -191,14 +191,30 @@ class LLaDARecommender(AbstractModel):
         label_mask = (labels_flat != -100) & (labels_flat > 0)
         valid_labels = labels_flat[label_mask]
         
-        # Get number of valid labels per batch
-        num_valid = label_mask.view(batch_size, -1).sum(dim=1)
+        # Multi-timestep training: use multiple timesteps per sample
+        num_timesteps = self.config.get('train_timesteps_per_sample', 1)
         
-        # Sample timesteps for each valid label
-        t = torch.randint(1, self.T + 1, (valid_labels.shape[0],), device=device)
+        if num_timesteps > 1:
+            # Expand each valid label to multiple timesteps
+            # valid_labels: [5, 23, 67] → [5, 5, 5, 5, 23, 23, 23, 23, 67, 67, 67, 67]
+            valid_labels_expanded = valid_labels.repeat_interleave(num_timesteps)
+            
+            # Sample different timesteps for each repetition
+            # t: [t1, t2, t3, t4, t1', t2', t3', t4', ...]
+            t = torch.randint(1, self.T + 1, (valid_labels_expanded.shape[0],), device=device)
+            
+            # Expand label_mask accordingly for later selection
+            # This will affect which positions we select from final_states
+            label_mask_expanded = label_mask.repeat_interleave(num_timesteps)
+            
+            valid_labels = valid_labels_expanded
+            label_mask = label_mask_expanded
+        else:
+            # Original: one timestep per sample
+            t = torch.randint(1, self.T + 1, (valid_labels.shape[0],), device=device)
         
         # Get target item codes for valid labels
-        target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+        target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels * num_timesteps, n_digit)
         
         # TODO: Enable forward diffusion after basic training works
         # Forward diffusion: mask some codes
