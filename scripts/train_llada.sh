@@ -13,10 +13,10 @@ CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --category=Beauty \
     --lr=0.01 \
     --temperature=0.03 \
-    --n_codebook=32 \
-    --diffusion_steps=32 \
+    --n_codebook=8 \
+    --diffusion_steps=8 \
     --mask_schedule=linear \
-    --codes_per_step=8 \
+    --codes_per_step=4 \
     --eval_batch_size=128 \
     --epochs=150
 
