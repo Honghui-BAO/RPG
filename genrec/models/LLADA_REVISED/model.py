@@ -252,6 +252,11 @@ class LLADARevised(AbstractModel):
         
         # Get embeddings for history items
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
+        
+        # Ensure all tokens are within vocab range
+        max_vocab_id = self.gpt2.config.vocab_size - 1
+        input_tokens = torch.clamp(input_tokens, 0, max_vocab_id)
+        
         input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
         
         # Add item position embedding
@@ -276,6 +281,8 @@ class LLADARevised(AbstractModel):
         input_embs = input_embs + item_pos_emb
         
         # Add target item embeddings (masked)
+        # Ensure masked_codes are within vocab range
+        masked_codes = torch.clamp(masked_codes, 0, max_vocab_id)
         target_embs = self.gpt2.wte(masked_codes).mean(dim=1, keepdim=True)  # (num_valid_labels, 1, n_embd)
         
         # Add time embedding to target
