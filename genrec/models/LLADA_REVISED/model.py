@@ -301,16 +301,21 @@ class LLADARevised(AbstractModel):
                 pad_emb = torch.zeros(1, pad_len, emb.shape[2], device=device)
                 emb = torch.cat([emb, pad_emb], dim=1)
             
-            # Create attention mask
+            # Create attention mask - ensure no out-of-bounds access
             attn_mask = torch.ones(1, emb.shape[1], device=device)
-            if emb.shape[1] > seq_lens[b] + 1:  # +1 for target
-                attn_mask[0, seq_lens[b]+1:] = 0
+            # Find valid length for this batch item
+            valid_len = seq_lens[b]
+            if valid_len < emb.shape[1]:
+                attn_mask[0, valid_len:] = 0
             
             padded_embs.append(emb)
             attention_masks.append(attn_mask)
         
         all_embs = torch.cat(padded_embs, dim=0)  # (batch_size, max_total_len, n_embd)
         attention_mask = torch.cat(attention_masks, dim=0)  # (batch_size, max_total_len)
+        
+        # Ensure attention_mask has correct values (0 or 1)
+        attention_mask = attention_mask.bool().float()
         
         # Pass through GPT2 (non-causal)
         outputs = self.gpt2(
