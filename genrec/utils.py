@@ -137,7 +137,7 @@ def get_tokenizer(model_name: str):
         if model_name == 'LLADA_REVISED':
             tokenizer_class = getattr(
                 importlib.import_module(f'genrec.models.{model_name}.tokenizer'),
-                f'{model_name}Tokenizer'
+                'LLADARevisedTokenizer'
             )
         else:
             tokenizer_class = getattr(
