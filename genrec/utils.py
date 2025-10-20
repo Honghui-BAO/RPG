@@ -133,10 +133,17 @@ def get_tokenizer(model_name: str):
         ValueError: If the tokenizer is not found.
     """
     try:
-        tokenizer_class = getattr(
-            importlib.import_module(f'genrec.models.{model_name}.tokenizer'),
-            f'{model_name}Tokenizer'
-        )
+        # Handle special cases
+        if model_name == 'LLADA_REVISED':
+            tokenizer_class = getattr(
+                importlib.import_module(f'genrec.models.{model_name}.tokenizer'),
+                f'{model_name}Tokenizer'
+            )
+        else:
+            tokenizer_class = getattr(
+                importlib.import_module(f'genrec.models.{model_name}.tokenizer'),
+                f'{model_name}Tokenizer'
+            )
     except:
         raise ValueError(f'Tokenizer for model "{model_name}" not found.')
     return tokenizer_class

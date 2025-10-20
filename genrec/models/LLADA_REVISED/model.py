@@ -1,0 +1,527 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+LLADA Revised: Non-causal GPT2 with item position embedding and target item masking
+
+Key changes from original LLADA:
+1. Remove causal attention (use bidirectional attention)
+2. Add item position embedding (not token position)
+3. Mask target item tokens during training
+4. Predict only masked tokens in target item
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import GPT2Config, GPT2Model
+import numpy as np
+
+from genrec.dataset import AbstractDataset
+from genrec.model import AbstractModel
+from genrec.tokenizer import AbstractTokenizer
+
+
+class ResBlock(nn.Module):
+    """Residual Block for prediction heads"""
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.linear = nn.Linear(hidden_size, hidden_size)
+        torch.nn.init.zeros_(self.linear.weight)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        return x + self.act(self.linear(x))
+
+
+class LLADARevised(AbstractModel):
+    """
+    LLADA Revised: Non-causal GPT2 with item position embedding
+    
+    Key features:
+    - Bidirectional attention (no causal mask)
+    - Item position embedding (not token position)
+    - Target item masking during training
+    - Predict only masked tokens
+    """
+    
+    def __init__(
+        self,
+        config: dict,
+        dataset: AbstractDataset,
+        tokenizer: AbstractTokenizer
+    ):
+        super(LLADARevised, self).__init__(config, dataset, tokenizer)
+        
+        # Semantic ID mapping
+        self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
+        
+        # Diffusion parameters
+        self.T = config.get('diffusion_steps', 32)
+        self.mask_schedule = config.get('mask_schedule', 'linear')
+        self.codes_per_step = config.get('codes_per_step', None)
+        
+        # Special tokens
+        self.mask_token_id = tokenizer.mask_token_id
+        
+        # GPT2 backbone with non-causal attention
+        gpt2config = GPT2Config(
+            vocab_size=tokenizer.vocab_size,
+            n_positions=tokenizer.max_token_seq_len + 1,  # +1 for target item
+            n_embd=config['n_embd'],
+            n_layer=config['n_layer'],
+            n_head=config['n_head'],
+            n_inner=config['n_inner'],
+            activation_function=config['activation_function'],
+            resid_pdrop=config['resid_pdrop'],
+            embd_pdrop=config['embd_pdrop'],
+            attn_pdrop=config['attn_pdrop'],
+            layer_norm_epsilon=config['layer_norm_epsilon'],
+            initializer_range=config['initializer_range'],
+            eos_token_id=tokenizer.eos_token,
+        )
+        self.gpt2 = GPT2Model(gpt2config)
+        
+        # Remove causal mask by overriding attention
+        self._remove_causal_mask()
+        
+        # Item position embedding (not token position)
+        self.max_item_seq_len = config['max_item_seq_len']
+        self.item_pos_embed = nn.Embedding(self.max_item_seq_len + 1, config['n_embd'])  # +1 for target
+        
+        # Time step embedding
+        self.time_embed = nn.Embedding(self.T + 1, config['n_embd'])
+        
+        # Prediction heads (32 heads for 32 semantic codes)
+        self.n_pred_head = self.tokenizer.n_digit
+        pred_head_list = []
+        for i in range(self.n_pred_head):
+            pred_head_list.append(ResBlock(self.config['n_embd']))
+        self.pred_heads = nn.Sequential(*pred_head_list)
+        
+        # Loss function
+        self.temperature = self.config['temperature']
+        self.loss_fct = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.ignored_label)
+        
+        # For graph-constrained decoding (inherited from RPG)
+        self.generate_w_decoding_graph = False
+        self.init_flag = False
+        self.chunk_size = config.get('chunk_size', 1024)
+        self.num_beams = config.get('num_beams', 50)
+        self.n_edges = config.get('n_edges', 50)
+        self.propagation_steps = config.get('propagation_steps', 3)
+
+    def _remove_causal_mask(self):
+        """Remove causal mask from GPT2 to enable bidirectional attention"""
+        for layer in self.gpt2.h:
+            layer.attn.c_attn = layer.attn.c_attn
+            # Override the forward method to remove causal mask
+            original_forward = layer.attn._attn
+            
+            def non_causal_attn(query, key, value, attention_mask=None, head_mask=None):
+                # Remove causal mask by setting it to None
+                return original_forward(query, key, value, attention_mask=None, head_mask=head_mask)
+            
+            layer.attn._attn = non_causal_attn
+
+    def _map_item_tokens(self) -> torch.Tensor:
+        """Maps item IDs to their semantic code tokens"""
+        item_id2tokens = torch.zeros((self.dataset.n_items, self.tokenizer.n_digit), dtype=torch.long)
+        for item in self.tokenizer.item2tokens:
+            item_id = self.dataset.item2id[item]
+            item_id2tokens[item_id] = torch.LongTensor(self.tokenizer.item2tokens[item])
+        return item_id2tokens
+
+    @property
+    def n_parameters(self) -> str:
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        emb_params = sum(p.numel() for p in self.gpt2.get_input_embeddings().parameters())
+        time_emb_params = sum(p.numel() for p in self.time_embed.parameters())
+        item_pos_emb_params = sum(p.numel() for p in self.item_pos_embed.parameters())
+        return f'#Embedding parameters: {emb_params}\n' \
+               f'#Time embedding parameters: {time_emb_params}\n' \
+               f'#Item position embedding parameters: {item_pos_emb_params}\n' \
+               f'#Non-embedding parameters: {total_params - emb_params - time_emb_params - item_pos_emb_params}\n' \
+               f'#Total trainable parameters: {total_params}\n'
+
+    def get_mask_ratio(self, t: int) -> float:
+        """Get masking ratio for timestep t"""
+        if self.mask_schedule == 'linear':
+            return t / self.T
+        elif self.mask_schedule == 'cosine':
+            return np.cos(np.pi * t / (2 * self.T))
+        elif self.mask_schedule == 'square':
+            return (t / self.T) ** 2
+        else:
+            return t / self.T
+
+    def forward_diffusion(self, target_codes: torch.Tensor, t: torch.Tensor):
+        """
+        Forward diffusion process: mask target codes
+        
+        Args:
+            target_codes: (batch_size, n_digit) clean semantic codes
+            t: (batch_size,) timesteps
+        
+        Returns:
+            masked_codes: (batch_size, n_digit) codes with some positions masked
+            mask: (batch_size, n_digit) boolean mask indicating which positions are masked
+            p_mask: (batch_size, n_digit) probability of masking for loss weighting
+        """
+        batch_size, n_digit = target_codes.shape
+        device = target_codes.device
+        
+        masked_codes = target_codes.clone()
+        mask = torch.zeros_like(target_codes, dtype=torch.bool)
+        p_mask = torch.zeros_like(target_codes, dtype=torch.float)
+        
+        for b in range(batch_size):
+            mask_ratio = self.get_mask_ratio(t[b].item())
+            num_masked = int(n_digit * mask_ratio)
+            
+            if num_masked > 0:
+                # Randomly select positions to mask
+                masked_positions = torch.randperm(n_digit, device=device)[:num_masked]
+                masked_codes[b, masked_positions] = self.mask_token_id
+                mask[b, masked_positions] = True
+                p_mask[b, masked_positions] = mask_ratio
+        
+        return masked_codes, mask, p_mask
+
+    def forward(self, batch: dict, return_loss=True) -> torch.Tensor:
+        """
+        Forward pass with target item masking
+        
+        Args:
+            batch: dict with keys ['input_ids', 'attention_mask', 'labels', 'seq_lens']
+        
+        Returns:
+            outputs with loss if return_loss=True
+        """
+        batch_size = batch['input_ids'].shape[0]
+        device = batch['input_ids'].device
+        
+        # Get valid labels (filter out -100 and 0 which is padding)
+        labels_flat = batch['labels'].view(-1)
+        label_mask = (labels_flat != -100) & (labels_flat > 0)
+        valid_labels = labels_flat[label_mask]
+        
+        # Sample timesteps for each valid label
+        t = torch.randint(1, self.T + 1, (valid_labels.shape[0],), device=device)
+        
+        # Get target item codes for valid labels
+        target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+        
+        # Forward diffusion: mask some codes
+        masked_codes, mask, p_mask = self.forward_diffusion(target_codes, t)
+        
+        # Get embeddings for history items
+        input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
+        input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
+        
+        # Add item position embedding
+        seq_lens = batch['seq_lens']
+        item_positions = []
+        for b in range(batch_size):
+            pos = torch.arange(seq_lens[b], device=device)
+            item_positions.append(pos)
+        
+        # Pad item positions to max length
+        max_len = input_embs.shape[1]
+        item_pos_embs = []
+        for b in range(batch_size):
+            pos = item_positions[b]
+            if len(pos) < max_len:
+                pos = torch.cat([pos, torch.zeros(max_len - len(pos), device=device, dtype=torch.long)])
+            item_pos_embs.append(pos)
+        item_positions = torch.stack(item_pos_embs)  # (batch_size, seq_len)
+        
+        # Add item position embeddings
+        item_pos_emb = self.item_pos_embed(item_positions)  # (batch_size, seq_len, n_embd)
+        input_embs = input_embs + item_pos_emb
+        
+        # Add target item embeddings (masked)
+        target_embs = self.gpt2.wte(masked_codes).mean(dim=1, keepdim=True)  # (num_valid_labels, 1, n_embd)
+        
+        # Add time embedding to target
+        time_emb = self.time_embed(t).unsqueeze(1)  # (num_valid_labels, 1, n_embd)
+        target_embs = target_embs + time_emb
+        
+        # Add target position embedding (last position)
+        target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
+        target_embs = target_embs + target_pos_emb.unsqueeze(1)
+        
+        # Concatenate history and target
+        all_embs = []
+        for b in range(batch_size):
+            # Find valid labels for this batch item
+            batch_label_mask = label_mask.view(batch_size, -1)[b]
+            if batch_label_mask.any():
+                # Get target embeddings for this batch
+                valid_idx = torch.where(batch_label_mask)[0]
+                target_emb_b = target_embs[valid_idx[0]:valid_idx[-1]+1]  # Get corresponding target emb
+                all_emb_b = torch.cat([input_embs[b:b+1], target_emb_b], dim=1)
+            else:
+                all_emb_b = input_embs[b:b+1]
+            all_embs.append(all_emb_b)
+        
+        # Pad to same length
+        max_total_len = max(emb.shape[1] for emb in all_embs)
+        padded_embs = []
+        attention_masks = []
+        
+        for b in range(batch_size):
+            emb = all_embs[b]
+            if emb.shape[1] < max_total_len:
+                pad_len = max_total_len - emb.shape[1]
+                pad_emb = torch.zeros(1, pad_len, emb.shape[2], device=device)
+                emb = torch.cat([emb, pad_emb], dim=1)
+            
+            # Create attention mask
+            attn_mask = torch.ones(1, emb.shape[1], device=device)
+            if emb.shape[1] > seq_lens[b] + 1:  # +1 for target
+                attn_mask[0, seq_lens[b]+1:] = 0
+            
+            padded_embs.append(emb)
+            attention_masks.append(attn_mask)
+        
+        all_embs = torch.cat(padded_embs, dim=0)  # (batch_size, max_total_len, n_embd)
+        attention_mask = torch.cat(attention_masks, dim=0)  # (batch_size, max_total_len)
+        
+        # Pass through GPT2 (non-causal)
+        outputs = self.gpt2(
+            inputs_embeds=all_embs,
+            attention_mask=attention_mask
+        )
+        
+        # Get representations for target positions
+        target_hidden = []
+        for b in range(batch_size):
+            batch_label_mask = label_mask.view(batch_size, -1)[b]
+            if batch_label_mask.any():
+                target_pos = seq_lens[b]  # Target is at position seq_len
+                target_hidden.append(outputs.last_hidden_state[b, target_pos:target_pos+1])
+            else:
+                # Dummy hidden state if no valid label
+                target_hidden.append(torch.zeros(1, outputs.last_hidden_state.shape[-1], device=device))
+        
+        target_hidden = torch.cat(target_hidden, dim=0)  # (batch_size, n_embd)
+        
+        # Get representations for all codebook positions
+        final_states = torch.cat([
+            self.pred_heads[i](target_hidden).unsqueeze(1) 
+            for i in range(self.n_pred_head)
+        ], dim=1)  # (batch_size, n_digit, n_embd)
+        
+        outputs.final_states = final_states
+        
+        if return_loss:
+            # Only compute loss for masked positions
+            selected_states = final_states[label_mask.view(batch_size, -1).any(dim=1)]  # (num_valid_labels, n_digit, n_embd)
+            
+            # Normalize states
+            selected_states_norm = F.normalize(selected_states, dim=-1)
+            
+            # Get token embeddings (exclude PAD, EOS, and MASK)
+            token_emb = self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']]
+            token_emb_norm = F.normalize(token_emb, dim=-1)
+            token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
+            
+            # Compute loss only for masked positions
+            selected_states_chunks = torch.chunk(selected_states_norm, self.n_pred_head, dim=1)
+            token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+            
+            losses = []
+            for i in range(self.n_pred_head):
+                # Compute logits for digit i
+                logits = torch.matmul(selected_states_chunks[i].squeeze(dim=1), token_embs[i].T) / self.temperature
+                
+                # Get labels - convert to local indices
+                labels = token_labels[:, i] - i * self.config['codebook_size'] - 1
+                
+                # Only compute loss for masked positions
+                mask_i = mask[:, i]  # Which samples have this codebook masked
+                if mask_i.sum() > 0:
+                    # Weight loss by p_mask (probability of masking)
+                    token_loss = F.cross_entropy(logits[mask_i], labels[mask_i], reduction='none')
+                    weighted_loss = token_loss / p_mask[mask_i, i]
+                    loss_i = torch.mean(weighted_loss)
+                    losses.append(loss_i)
+            
+            outputs.loss = torch.mean(torch.stack(losses)) if losses else torch.tensor(0.0, device=device)
+        
+        return outputs
+
+    @torch.no_grad()
+    def generate(self, batch, n_return_sequences=1, return_codes=False):
+        """
+        Generate recommendations using iterative denoising
+        """
+        batch_size = batch['input_ids'].shape[0]
+        device = batch['input_ids'].device
+        
+        # Initialize: all codes are masked
+        current_codes = torch.full(
+            (batch_size, self.n_pred_head),
+            self.mask_token_id,
+            device=device,
+            dtype=torch.long
+        )
+        
+        # Iterative denoising from t=T to t=1
+        for t in reversed(range(1, self.T + 1)):
+            # Early stopping: if all codes are determined, stop iterating
+            if (current_codes != self.mask_token_id).all():
+                break
+            
+            # Construct input with current codes
+            input_tokens = self.item_id2tokens[batch['input_ids']]
+            input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)
+            
+            # Add item position embedding
+            seq_lens = batch['seq_lens']
+            item_positions = []
+            for b in range(batch_size):
+                pos = torch.arange(seq_lens[b], device=device)
+                if len(pos) < input_embs.shape[1]:
+                    pos = torch.cat([pos, torch.zeros(input_embs.shape[1] - len(pos), device=device, dtype=torch.long)])
+                item_positions.append(pos)
+            item_positions = torch.stack(item_positions)
+            
+            item_pos_emb = self.item_pos_embed(item_positions)
+            input_embs = input_embs + item_pos_emb
+            
+            # Get embeddings for current codes
+            target_embs = self.gpt2.wte(current_codes).mean(dim=1, keepdim=True)
+            
+            # Add time embedding
+            time_emb = self.time_embed(torch.full((batch_size,), t, device=device))
+            target_embs = target_embs + time_emb.unsqueeze(1)
+            
+            # Add target position embedding
+            target_pos_emb = self.item_pos_embed(torch.full((batch_size,), input_embs.shape[1], device=device))
+            target_embs = target_embs + target_pos_emb.unsqueeze(1)
+            
+            # Concatenate
+            all_embs = torch.cat([input_embs, target_embs], dim=1)
+            
+            # Extend attention mask
+            attention_mask_extended = torch.cat([
+                batch['attention_mask'],
+                torch.ones(batch_size, 1, device=device, dtype=batch['attention_mask'].dtype)
+            ], dim=1)
+            
+            # Forward
+            outputs = self.gpt2(inputs_embeds=all_embs, attention_mask=attention_mask_extended)
+            target_hidden = outputs.last_hidden_state[:, -1, :]
+            
+            # Predict codes
+            final_states = torch.cat([
+                self.pred_heads[i](target_hidden).unsqueeze(1) 
+                for i in range(self.n_pred_head)
+            ], dim=1)
+            
+            # Get predictions for each digit
+            final_states_norm = F.normalize(final_states, dim=-1)
+            token_emb_norm = F.normalize(self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']], dim=-1)
+            token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
+            
+            predicted_codes = []
+            confidence_scores = []
+            
+            for i in range(self.n_pred_head):
+                logits = torch.matmul(final_states_norm[:, i, :], token_embs[i].T) / self.temperature
+                probs = F.softmax(logits, dim=-1)
+                
+                # Get predicted code and confidence
+                conf, pred_idx = probs.max(dim=-1)
+                predicted_code = pred_idx + i * self.config['codebook_size'] + 1
+                
+                predicted_codes.append(predicted_code)
+                confidence_scores.append(conf)
+            
+            predicted_codes = torch.stack(predicted_codes, dim=1)
+            confidence_scores = torch.stack(confidence_scores, dim=1)
+            
+            # Update strategy: keep high-confidence predictions
+            if t > 1:
+                if self.codes_per_step is not None:
+                    steps_done = self.T - t + 1
+                    num_to_keep = min(steps_done * self.codes_per_step, self.n_pred_head)
+                else:
+                    mask_ratio = self.get_mask_ratio(t - 1)
+                    num_to_keep = int(self.n_pred_head * (1 - mask_ratio))
+                
+                # Keep top-k confident predictions
+                _, top_k_indices = confidence_scores.topk(num_to_keep, dim=1)
+                
+                # Update current_codes (only change positions that are still MASK)
+                for b in range(batch_size):
+                    for idx in top_k_indices[b]:
+                        if current_codes[b, idx] == self.mask_token_id:
+                            current_codes[b, idx] = predicted_codes[b, idx]
+            else:
+                # Last step: use all predictions
+                current_codes = predicted_codes
+        
+        # Convert codes to item IDs
+        mapping_method = self.config.get('code_to_item_method', 'count')
+        item_logits = self._codes_to_item_logits(current_codes, method=mapping_method)
+        preds = item_logits.topk(n_return_sequences, dim=-1).indices + 1
+        
+        # Check code validity
+        if return_codes:
+            validity_stats = self.check_code_validity(current_codes)
+            return preds.unsqueeze(-1), current_codes, validity_stats
+        
+        return preds.unsqueeze(-1)
+
+    def _codes_to_item_logits(self, codes: torch.Tensor, method='count') -> torch.Tensor:
+        """Convert semantic codes to item logits"""
+        batch_size = codes.shape[0]
+        all_item_codes = self.item_id2tokens[1:]  # (n_items-1, n_digit)
+        
+        if method == 'count':
+            # Method 1: Count matching codes
+            item_logits = torch.zeros(batch_size, self.dataset.n_items - 1, device=codes.device)
+            for b in range(batch_size):
+                matches = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
+                item_logits[b] = matches.float()
+        
+        elif method == 'embedding':
+            # Method 2: Use embedding similarity
+            code_embs = self.gpt2.wte(codes).mean(dim=1)
+            all_item_embs = self.gpt2.wte(all_item_codes).mean(dim=1)
+            
+            code_embs_norm = F.normalize(code_embs, dim=-1)
+            all_item_embs_norm = F.normalize(all_item_embs, dim=-1)
+            item_logits = torch.matmul(code_embs_norm, all_item_embs_norm.T)
+        
+        return item_logits
+
+    def check_code_validity(self, codes: torch.Tensor) -> dict:
+        """Check if generated codes match any real items"""
+        batch_size = codes.shape[0]
+        all_item_codes = self.item_id2tokens[1:]  # (n_items-1, n_digit)
+        
+        exact_matches = 0
+        max_matches = []
+        
+        for b in range(batch_size):
+            matches = (codes[b].unsqueeze(0) == all_item_codes).all(dim=1)
+            
+            if matches.any():
+                exact_matches += 1
+            
+            num_matching_codes = (codes[b].unsqueeze(0) == all_item_codes).sum(dim=1)
+            max_matches.append(num_matching_codes.max().item())
+        
+        return {
+            'exact_match_rate': exact_matches / batch_size,
+            'avg_max_matching_codes': sum(max_matches) / len(max_matches),
+            'exact_matches': exact_matches,
+            'total': batch_size
+        }
