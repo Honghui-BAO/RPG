@@ -116,24 +116,34 @@ class LLADARevised(AbstractModel):
 
     def _remove_causal_mask(self):
         """Remove causal mask from GPT2 to enable bidirectional attention"""
-        # Override _scaled_dot_product_attention method for each layer
+        # Override the attention forward method for each layer
         for layer in self.gpt2.h:
-            # Store original _scaled_dot_product_attention method
-            original_scaled_dot_product_attention = layer.attn._scaled_dot_product_attention
+            # Store original forward method
+            original_forward = layer.attn.forward
             
-            def non_causal_scaled_dot_product_attention(query, key, value, attention_mask=None, head_mask=None):
-                # Call original method but with is_causal=False
-                return original_scaled_dot_product_attention(
-                    query=query,
-                    key=key, 
-                    value=value,
-                    attention_mask=attention_mask,
+            def non_causal_forward(hidden_states, layer_past=None, attention_mask=None, head_mask=None, 
+                                 encoder_hidden_states=None, encoder_attention_mask=None, 
+                                 use_cache=False, output_attentions=False):
+                # Create a custom attention mask that removes causal behavior
+                if attention_mask is not None:
+                    # Keep the original attention mask for padding, but remove causal structure
+                    # We'll pass None to let the model handle it without causal masking
+                    attention_mask = None
+                
+                # Call original forward method
+                return original_forward(
+                    hidden_states=hidden_states,
+                    layer_past=layer_past,
+                    attention_mask=attention_mask,  # Pass None to disable causal mask
                     head_mask=head_mask,
-                    is_causal=False  # ← 关键：设置为False禁用causal mask
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions
                 )
             
-            # Replace the _scaled_dot_product_attention method
-            layer.attn._scaled_dot_product_attention = non_causal_scaled_dot_product_attention
+            # Replace the forward method
+            layer.attn.forward = non_causal_forward
 
     def _map_item_tokens(self) -> torch.Tensor:
         """Maps item IDs to their semantic code tokens"""
