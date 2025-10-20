@@ -372,22 +372,26 @@ class LLADARevised(AbstractModel):
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
-            # Get target hidden states for valid labels
+            # Get target hidden states for each valid label
             target_hidden = []
             for b in range(batch_size):
                 batch_label_mask = label_mask.view(batch_size, -1)[b]
                 if batch_label_mask.any():
                     target_pos = seq_lens[b]  # Target is at position seq_len
-                    target_hidden.append(outputs.last_hidden_state[b, target_pos:target_pos+1])
+                    target_hidden_b = outputs.last_hidden_state[b, target_pos:target_pos+1]  # (1, n_embd)
+                    # Repeat for each valid label in this batch
+                    valid_positions = torch.where(batch_label_mask)[0]
+                    for _ in valid_positions:
+                        target_hidden.append(target_hidden_b)
             
             if target_hidden:
-                target_hidden = torch.cat(target_hidden, dim=0)  # (num_valid_batch, n_embd)
+                target_hidden = torch.cat(target_hidden, dim=0)  # (num_valid_labels, n_embd)
                 
                 # Get representations for all codebook positions
                 final_states = torch.cat([
                     self.pred_heads[i](target_hidden).unsqueeze(1) 
                     for i in range(self.n_pred_head)
-                ], dim=1)  # (num_valid_batch, n_digit, n_embd)
+                ], dim=1)  # (num_valid_labels, n_digit, n_embd)
                 
                 # Normalize states
                 final_states_norm = F.normalize(final_states, dim=-1)
