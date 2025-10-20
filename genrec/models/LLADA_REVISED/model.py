@@ -299,12 +299,12 @@ class LLADARevised(AbstractModel):
             # Find valid labels for this batch item
             batch_label_mask = label_mask.view(batch_size, -1)[b]
             if batch_label_mask.any():
-                # Get target embeddings for this batch
+                # Get target embeddings for this batch - only take the first valid target
                 valid_idx = torch.where(batch_label_mask)[0]
-                target_emb_b = target_embs[valid_idx[0]:valid_idx[-1]+1]  # (num_valid, 1, n_embd)
+                target_emb_b = target_embs[valid_idx[0]:valid_idx[0]+1]  # (1, 1, n_embd)
                 # Reshape target_emb_b to match input_embs dimension
-                target_emb_b = target_emb_b.squeeze(1)  # (num_valid, n_embd)
-                target_emb_b = target_emb_b.unsqueeze(0)  # (1, num_valid, n_embd)
+                target_emb_b = target_emb_b.squeeze(1)  # (1, n_embd)
+                target_emb_b = target_emb_b.unsqueeze(0)  # (1, 1, n_embd)
                 all_emb_b = torch.cat([input_embs[b:b+1], target_emb_b], dim=1)
             else:
                 all_emb_b = input_embs[b:b+1]
