@@ -392,9 +392,14 @@ class LLADARevised(AbstractModel):
                 # Only compute loss for masked positions
                 mask_i = mask[:, i]  # Which samples have this codebook masked
                 if mask_i.sum() > 0:
+                    # Get masked logits and labels
+                    masked_logits = logits[mask_i]  # (num_masked, codebook_size)
+                    masked_labels = labels[mask_i]  # (num_masked,)
+                    masked_p_mask = p_mask[mask_i, i]  # (num_masked,)
+                    
                     # Weight loss by p_mask (probability of masking)
-                    token_loss = F.cross_entropy(logits[mask_i], labels[mask_i], reduction='none')
-                    weighted_loss = token_loss / p_mask[mask_i, i]
+                    token_loss = F.cross_entropy(masked_logits, masked_labels, reduction='none')
+                    weighted_loss = token_loss / masked_p_mask
                     loss_i = torch.mean(weighted_loss)
                     losses.append(loss_i)
             
