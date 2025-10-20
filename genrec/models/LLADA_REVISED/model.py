@@ -366,56 +366,58 @@ class LLADARevised(AbstractModel):
         outputs.final_states = final_states
         
         if return_loss:
-            # Only compute loss for masked positions
-            # Get batch indices that have valid labels
-            batch_has_labels = label_mask.view(batch_size, -1).any(dim=1)  # (batch_size,)
-            batch_indices = torch.where(batch_has_labels)[0]  # (num_valid_batch,)
-            selected_states = final_states[batch_indices]  # (num_valid_batch, n_digit, n_embd)
-            
-            # Normalize states
-            selected_states_norm = F.normalize(selected_states, dim=-1)
-            
+            # Simple approach: compute loss directly on valid_labels
             # Get token embeddings (exclude PAD, EOS, and MASK)
             token_emb = self.gpt2.wte.weight[1:1+self.n_pred_head*self.config['codebook_size']]
             token_emb_norm = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb_norm, self.n_pred_head, dim=0)
             
-            # Compute loss only for masked positions
-            selected_states_chunks = torch.chunk(selected_states_norm, self.n_pred_head, dim=1)
-            token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+            # Get target hidden states for valid labels
+            target_hidden = []
+            for b in range(batch_size):
+                batch_label_mask = label_mask.view(batch_size, -1)[b]
+                if batch_label_mask.any():
+                    target_pos = seq_lens[b]  # Target is at position seq_len
+                    target_hidden.append(outputs.last_hidden_state[b, target_pos:target_pos+1])
             
-            # Create batch-level mask for selected states
-            batch_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            batch_mask[batch_indices] = True
-            
-            # Map valid_labels to batch indices
-            valid_to_batch = {}
-            for i, batch_idx in enumerate(batch_indices):
-                batch_label_mask = label_mask.view(batch_size, -1)[batch_idx]
-                valid_positions = torch.where(batch_label_mask)[0]
-                for j, pos in enumerate(valid_positions):
-                    valid_to_batch[i * len(valid_positions) + j] = (batch_idx, pos)
-            
-            losses = []
-            for i in range(self.n_pred_head):
-                # Only compute loss for masked positions
-                mask_i = mask[:, i]  # Which samples have this codebook masked (num_valid_labels,)
-                if mask_i.sum() > 0:
-                    # Compute logits for digit i only for masked samples
-                    masked_states = selected_states_chunks[i][mask_i]  # (num_masked, n_embd)
-                    logits = torch.matmul(masked_states.squeeze(dim=1), token_embs[i].T) / self.temperature
-                    
-                    # Get labels - convert to local indices
-                    labels = token_labels[mask_i, i] - i * self.config['codebook_size'] - 1
-                    masked_p_mask = p_mask[mask_i, i]  # (num_masked,)
-                    
-                    # Weight loss by p_mask (probability of masking)
-                    token_loss = F.cross_entropy(logits, labels, reduction='none')
-                    weighted_loss = token_loss / masked_p_mask
-                    loss_i = torch.mean(weighted_loss)
-                    losses.append(loss_i)
-            
-            outputs.loss = torch.mean(torch.stack(losses)) if losses else torch.tensor(0.0, device=device)
+            if target_hidden:
+                target_hidden = torch.cat(target_hidden, dim=0)  # (num_valid_batch, n_embd)
+                
+                # Get representations for all codebook positions
+                final_states = torch.cat([
+                    self.pred_heads[i](target_hidden).unsqueeze(1) 
+                    for i in range(self.n_pred_head)
+                ], dim=1)  # (num_valid_batch, n_digit, n_embd)
+                
+                # Normalize states
+                final_states_norm = F.normalize(final_states, dim=-1)
+                final_states_chunks = torch.chunk(final_states_norm, self.n_pred_head, dim=1)
+                
+                # Get token labels for valid labels
+                token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
+                
+                losses = []
+                for i in range(self.n_pred_head):
+                    # Only compute loss for masked positions
+                    mask_i = mask[:, i]  # Which samples have this codebook masked (num_valid_labels,)
+                    if mask_i.sum() > 0:
+                        # Get masked logits and labels
+                        masked_logits = torch.matmul(final_states_chunks[i].squeeze(dim=1), token_embs[i].T) / self.temperature
+                        masked_logits = masked_logits[mask_i]  # (num_masked, codebook_size)
+                        
+                        labels = token_labels[:, i] - i * self.config['codebook_size'] - 1
+                        masked_labels = labels[mask_i]  # (num_masked,)
+                        masked_p_mask = p_mask[mask_i, i]  # (num_masked,)
+                        
+                        # Weight loss by p_mask (probability of masking)
+                        token_loss = F.cross_entropy(masked_logits, masked_labels, reduction='none')
+                        weighted_loss = token_loss / masked_p_mask
+                        loss_i = torch.mean(weighted_loss)
+                        losses.append(loss_i)
+                
+                outputs.loss = torch.mean(torch.stack(losses)) if losses else torch.tensor(0.0, device=device)
+            else:
+                outputs.loss = torch.tensor(0.0, device=device, requires_grad=True)
         
         return outputs
 
