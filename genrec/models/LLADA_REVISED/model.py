@@ -116,16 +116,55 @@ class LLADARevised(AbstractModel):
 
     def _remove_causal_mask(self):
         """Remove causal mask from GPT2 to enable bidirectional attention"""
+        # Override the attention forward method for each layer
         for layer in self.gpt2.h:
-            layer.attn.c_attn = layer.attn.c_attn
-            # Override the forward method to remove causal mask
-            original_forward = layer.attn._attn
+            # Store original forward method
+            original_forward = layer.attn.forward
             
-            def non_causal_attn(query, key, value, attention_mask=None, head_mask=None):
-                # Remove causal mask by setting it to None
-                return original_forward(query, key, value, attention_mask=None, head_mask=head_mask)
+            def non_causal_forward(hidden_states, layer_past=None, attention_mask=None, head_mask=None, 
+                                 encoder_hidden_states=None, encoder_attention_mask=None, 
+                                 use_cache=False, output_attentions=False):
+                # Call original forward but with attention_mask=None to remove causal mask
+                return original_forward(
+                    hidden_states=hidden_states,
+                    layer_past=layer_past,
+                    attention_mask=None,  # ← 关键：移除causal mask
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions
+                )
             
-            layer.attn._attn = non_causal_attn
+            # Replace the forward method
+            layer.attn.forward = non_causal_forward
+        
+        # Also override the model's forward to ensure no causal mask is applied
+        original_model_forward = self.gpt2.forward
+        
+        def non_causal_model_forward(input_ids=None, past_key_values=None, attention_mask=None, 
+                                   token_type_ids=None, position_ids=None, head_mask=None, 
+                                   inputs_embeds=None, encoder_hidden_states=None, 
+                                   encoder_attention_mask=None, use_cache=None, output_attentions=None, 
+                                   output_hidden_states=None, return_dict=None):
+            # Call original forward but ensure no causal mask
+            return original_model_forward(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,  # Keep user-provided attention mask (for padding)
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict
+            )
+        
+        self.gpt2.forward = non_causal_model_forward
 
     def _map_item_tokens(self) -> torch.Tensor:
         """Maps item IDs to their semantic code tokens"""
