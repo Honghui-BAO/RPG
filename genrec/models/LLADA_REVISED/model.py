@@ -425,9 +425,12 @@ class LLADARevised(AbstractModel):
         )
         
         # Iterative denoising from t=T to t=1
+        steps_used = 0
         for t in reversed(range(1, self.T + 1)):
+            steps_used += 1
             # Early stopping: if all codes are determined, stop iterating
             if (current_codes != self.mask_token_id).all():
+                print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}")
                 break
             
             # Construct input with current codes
