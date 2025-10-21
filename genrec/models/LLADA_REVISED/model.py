@@ -506,38 +506,49 @@ class LLADARevised(AbstractModel):
             predicted_codes = torch.stack(predicted_codes, dim=1)
             confidence_scores = torch.stack(confidence_scores, dim=1)
             
-            # Update strategy: keep high-confidence predictions
+            # Update strategy: determine fixed number of codes per step
             if t > 1:
                 if self.codes_per_step is not None:
-                    # Fixed number of codes to update each step
-                    num_to_keep = self.codes_per_step
+                    # Fixed number of codes to determine each step
+                    num_to_determine = min(self.codes_per_step, (current_codes == self.mask_token_id).sum().item())
                 else:
-                    # Use mask ratio: higher mask ratio -> keep fewer codes
+                    # Use mask ratio: higher mask ratio -> determine fewer codes
                     mask_ratio = self.get_mask_ratio(t - 1)
-                    num_to_keep = int(self.n_pred_head * (1 - mask_ratio))
+                    num_to_determine = int(self.n_pred_head * (1 - mask_ratio))
                 
-                # Keep top-k confident predictions
-                _, top_k_indices = confidence_scores.topk(num_to_keep, dim=1)
+                # Find positions that are still MASK
+                mask_positions = (current_codes == self.mask_token_id)
                 
-                # Update current_codes (only change positions that are still MASK)
-                updated_any = False
-                mask_count_before = (current_codes == self.mask_token_id).sum().item()
-                for b in range(batch_size):
-                    for idx in top_k_indices[b]:
-                        if current_codes[b, idx] == self.mask_token_id:
-                            current_codes[b, idx] = predicted_codes[b, idx]
-                            updated_any = True
-                mask_count_after = (current_codes == self.mask_token_id).sum().item()
-                print(f"[DEBUG] Step {steps_used}, t={t}: masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
-                
-                # Early termination: if no more MASK tokens, break
-                if not updated_any:
-                    print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, no updates")
-                    break
-                
-                # Also check if all codes are determined
-                if (current_codes != self.mask_token_id).all():
-                    print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, all codes determined")
+                if mask_positions.any():
+                    # Get confidence scores only for MASK positions
+                    mask_confidence = confidence_scores.clone()
+                    mask_confidence[~mask_positions] = -float('inf')  # Set non-MASK positions to -inf
+                    
+                    # Keep top-k confident predictions among MASK positions
+                    _, top_k_indices = mask_confidence.topk(num_to_determine, dim=1)
+                    
+                    # Update current_codes (only change positions that are still MASK)
+                    updated_any = False
+                    mask_count_before = (current_codes == self.mask_token_id).sum().item()
+                    for b in range(batch_size):
+                        for idx in top_k_indices[b]:
+                            if current_codes[b, idx] == self.mask_token_id:
+                                current_codes[b, idx] = predicted_codes[b, idx]
+                                updated_any = True
+                    mask_count_after = (current_codes == self.mask_token_id).sum().item()
+                    print(f"[DEBUG] Step {steps_used}, t={t}: determined {num_to_determine} codes, masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
+                    
+                    # Early termination: if no more MASK tokens, break
+                    if not updated_any:
+                        print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, no updates")
+                        break
+                    
+                    # Also check if all codes are determined
+                    if (current_codes != self.mask_token_id).all():
+                        print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, all codes determined")
+                        break
+                else:
+                    print(f"[DEBUG] Step {steps_used}, t={t}: no MASK positions left, breaking")
                     break
             else:
                 # Last step: use all predictions
