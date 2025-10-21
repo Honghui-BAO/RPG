@@ -56,6 +56,14 @@ class LLADARevised(AbstractModel):
     ):
         super(LLADARevised, self).__init__(config, dataset, tokenizer)
         
+        # Print all config information
+        print("=" * 80)
+        print("LLADA_REVISED Model Configuration:")
+        print("=" * 80)
+        for key, value in config.items():
+            print(f"{key}: {value}")
+        print("=" * 80)
+        
         # Semantic ID mapping
         self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
         
