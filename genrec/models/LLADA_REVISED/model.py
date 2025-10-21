@@ -39,13 +39,13 @@ class ResBlock(nn.Module):
 
 class LLADARevised(AbstractModel):
     """
-    LLADA Revised: Non-causal GPT2 with item position embedding
+    LLADA Revised: RPG with iterative inference and MASK token
     
     Key features:
-    - Bidirectional attention (no causal mask)
-    - Item position embedding (not token position)
-    - Target item masking during training
-    - Predict only masked tokens
+    - Causal attention (same as RPG)
+    - Iterative inference with codes_per_step control
+    - MASK token for inference (no diffusion training)
+    - Simplified architecture - just RPG + iterative inference
     """
     
     def __init__(
@@ -75,7 +75,7 @@ class LLADARevised(AbstractModel):
         # Special tokens
         self.mask_token_id = tokenizer.mask_token_id
         
-        # GPT2 backbone with non-causal attention
+        # GPT2 backbone with causal attention (same as RPG)
         gpt2config = GPT2Config(
             vocab_size=tokenizer.vocab_size,  # This includes MASK token (8195)
             n_positions=tokenizer.max_token_seq_len + 1,  # +1 for target item
@@ -91,16 +91,13 @@ class LLADARevised(AbstractModel):
             initializer_range=config['initializer_range'],
             eos_token_id=tokenizer.eos_token,
             pad_token_id=0,  # Use 0 as padding token
-            is_causal=False,  # Enable bidirectional attention
+            is_causal=True,  # Use causal attention like RPG
         )
         self.gpt2 = GPT2Model(gpt2config)
         
-        # Item position embedding (not token position)
-        self.max_item_seq_len = config['max_item_seq_len']
-        self.item_pos_embed = nn.Embedding(self.max_item_seq_len + 1, config['n_embd'])  # +1 for target
+        # Item position embedding removed - keep it simple like RPG
         
-        # Time step embedding
-        self.time_embed = nn.Embedding(self.T + 1, config['n_embd'])
+        # Time step embedding removed - not needed without proper diffusion training
         
         # Prediction heads (32 heads for 32 semantic codes)
         self.n_pred_head = self.tokenizer.n_digit
@@ -134,12 +131,8 @@ class LLADARevised(AbstractModel):
     def n_parameters(self) -> str:
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         emb_params = sum(p.numel() for p in self.gpt2.get_input_embeddings().parameters())
-        time_emb_params = sum(p.numel() for p in self.time_embed.parameters())
-        item_pos_emb_params = sum(p.numel() for p in self.item_pos_embed.parameters())
         return f'#Embedding parameters: {emb_params}\n' \
-               f'#Time embedding parameters: {time_emb_params}\n' \
-               f'#Item position embedding parameters: {item_pos_emb_params}\n' \
-               f'#Non-embedding parameters: {total_params - emb_params - time_emb_params - item_pos_emb_params}\n' \
+               f'#Non-embedding parameters: {total_params - emb_params}\n' \
                f'#Total trainable parameters: {total_params}\n'
 
     def get_mask_ratio(self, t: int) -> float:
@@ -245,28 +238,14 @@ class LLADARevised(AbstractModel):
             pos = torch.arange(seq_lens[b], device=device)
             item_positions.append(pos)
         
-        # Pad item positions to max length
-        max_len = input_embs.shape[1]
-        item_pos_embs = []
-        for b in range(batch_size):
-            pos = item_positions[b]
-            if len(pos) < max_len:
-                pos = torch.cat([pos, torch.zeros(max_len - len(pos), device=device, dtype=torch.long)])
-            item_pos_embs.append(pos)
-        item_positions = torch.stack(item_pos_embs)  # (batch_size, seq_len)
-        
-        # Add item position embeddings
-        item_pos_emb = self.item_pos_embed(item_positions)  # (batch_size, seq_len, n_embd)
-        input_embs = input_embs + item_pos_emb
+        # Item position embedding removed - keep it simple like RPG
         
         # Add target item embeddings (masked)
         # Ensure masked_codes are within vocab range
         masked_codes = torch.clamp(masked_codes, 0, max_vocab_id)
         target_embs = self.gpt2.wte(masked_codes).mean(dim=1, keepdim=True)  # (num_valid_labels, 1, n_embd)
         
-        # Add time embedding to target
-        time_emb = self.time_embed(t).unsqueeze(1)  # (num_valid_labels, 1, n_embd)
-        target_embs = target_embs + time_emb
+        # Time embedding removed - not needed without proper diffusion training
         
         # Note: We don't add target position embedding to avoid sequence dependency
         # target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
@@ -441,25 +420,12 @@ class LLADARevised(AbstractModel):
             input_tokens = self.item_id2tokens[batch['input_ids']]
             input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)
             
-            # Add item position embedding
-            seq_lens = batch['seq_lens']
-            item_positions = []
-            for b in range(batch_size):
-                pos = torch.arange(seq_lens[b], device=device)
-                if len(pos) < input_embs.shape[1]:
-                    pos = torch.cat([pos, torch.zeros(input_embs.shape[1] - len(pos), device=device, dtype=torch.long)])
-                item_positions.append(pos)
-            item_positions = torch.stack(item_positions)
-            
-            item_pos_emb = self.item_pos_embed(item_positions)
-            input_embs = input_embs + item_pos_emb
+            # Item position embedding removed - keep it simple like RPG
             
             # Get embeddings for current codes
             target_embs = self.gpt2.wte(current_codes).mean(dim=1, keepdim=True)
             
-            # Add time embedding
-            time_emb = self.time_embed(torch.full((batch_size,), t, device=device))
-            target_embs = target_embs + time_emb.unsqueeze(1)
+            # Time embedding removed - not needed without proper diffusion training
             
             # Concatenate
             all_embs = torch.cat([input_embs, target_embs], dim=1)
