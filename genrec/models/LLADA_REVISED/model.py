@@ -551,10 +551,16 @@ class LLADARevised(AbstractModel):
                 _, top_k_indices = confidence_scores.topk(num_to_keep, dim=1)
                 
                 # Update current_codes (only change positions that are still MASK)
+                updated_any = False
                 for b in range(batch_size):
                     for idx in top_k_indices[b]:
                         if current_codes[b, idx] == self.mask_token_id:
                             current_codes[b, idx] = predicted_codes[b, idx]
+                            updated_any = True
+                
+                # Early termination: if no more MASK tokens, break
+                if not updated_any:
+                    break
             else:
                 # Last step: use all predictions
                 current_codes = predicted_codes
