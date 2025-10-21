@@ -540,9 +540,10 @@ class LLADARevised(AbstractModel):
             # Update strategy: keep high-confidence predictions
             if t > 1:
                 if self.codes_per_step is not None:
-                    steps_done = self.T - t + 1
-                    num_to_keep = min(steps_done * self.codes_per_step, self.n_pred_head)
+                    # Fixed number of codes to update each step
+                    num_to_keep = self.codes_per_step
                 else:
+                    # Use mask ratio: higher mask ratio -> keep fewer codes
                     mask_ratio = self.get_mask_ratio(t - 1)
                     num_to_keep = int(self.n_pred_head * (1 - mask_ratio))
                 
