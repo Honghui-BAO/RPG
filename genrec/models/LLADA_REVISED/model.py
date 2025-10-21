@@ -234,9 +234,9 @@ class LLADARevised(AbstractModel):
         label_mask = (labels_flat != -100) & (labels_flat > 0) & (labels_flat < self.dataset.n_items)
         valid_labels = labels_flat[label_mask]
         
-        print(f"[DEBUG] batch_size: {batch_size}")
-        print(f"[DEBUG] labels_flat shape: {labels_flat.shape}, unique values: {torch.unique(labels_flat)}")
-        print(f"[DEBUG] valid_labels shape: {valid_labels.shape}, sample values: {valid_labels[:5] if len(valid_labels) > 0 else 'None'}")
+        # print(f"[DEBUG] batch_size: {batch_size}")
+        # print(f"[DEBUG] labels_flat shape: {labels_flat.shape}, unique values: {torch.unique(labels_flat)}")
+        # print(f"[DEBUG] valid_labels shape: {valid_labels.shape}, sample values: {valid_labels[:5] if len(valid_labels) > 0 else 'None'}")
         
         # Check if we have any valid labels
         if valid_labels.shape[0] == 0:
@@ -247,17 +247,17 @@ class LLADARevised(AbstractModel):
         
         # Sample timesteps for each valid label
         t = torch.randint(1, self.T + 1, (valid_labels.shape[0],), device=device)
-        print(f"[DEBUG] t shape: {t.shape}, sample values: {t[:5]}")
+        # print(f"[DEBUG] t shape: {t.shape}, sample values: {t[:5]}")
         
         # Get target item codes for valid labels
         target_codes = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
-        print(f"[DEBUG] target_codes shape: {target_codes.shape}, sample values: {target_codes[:2, :5] if target_codes.shape[0] > 0 else 'None'}")
+        # print(f"[DEBUG] target_codes shape: {target_codes.shape}, sample values: {target_codes[:2, :5] if target_codes.shape[0] > 0 else 'None'}")
         
         # Forward diffusion: mask some codes
         masked_codes, mask, p_mask = self.forward_diffusion(target_codes, t)
-        print(f"[DEBUG] masked_codes shape: {masked_codes.shape}")
-        print(f"[DEBUG] mask shape: {mask.shape}, mask sum: {mask.sum()}")
-        print(f"[DEBUG] p_mask shape: {p_mask.shape}, p_mask range: [{p_mask.min():.3f}, {p_mask.max():.3f}]")
+        # print(f"[DEBUG] masked_codes shape: {masked_codes.shape}")
+        # print(f"[DEBUG] mask shape: {mask.shape}, mask sum: {mask.sum()}")
+        # print(f"[DEBUG] p_mask shape: {p_mask.shape}, p_mask range: [{p_mask.min():.3f}, {p_mask.max():.3f}]")
         
         # Get embeddings for history items
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
@@ -298,9 +298,9 @@ class LLADARevised(AbstractModel):
         time_emb = self.time_embed(t).unsqueeze(1)  # (num_valid_labels, 1, n_embd)
         target_embs = target_embs + time_emb
         
-        # Add target position embedding (last position)
-        target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
-        target_embs = target_embs + target_pos_emb.unsqueeze(1)
+        # Note: We don't add target position embedding to avoid sequence dependency
+        # target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
+        # target_embs = target_embs + target_pos_emb.unsqueeze(1)
         
         # Concatenate history and target
         all_embs = []
@@ -395,52 +395,52 @@ class LLADARevised(AbstractModel):
             
             if target_hidden:
                 target_hidden = torch.cat(target_hidden, dim=0)  # (num_valid_labels, n_embd)
-                print(f"[DEBUG] target_hidden shape: {target_hidden.shape}")
+                # print(f"[DEBUG] target_hidden shape: {target_hidden.shape}")
                 
                 # Get representations for all codebook positions
                 final_states = torch.cat([
                     self.pred_heads[i](target_hidden).unsqueeze(1) 
                     for i in range(self.n_pred_head)
                 ], dim=1)  # (num_valid_labels, n_digit, n_embd)
-                print(f"[DEBUG] final_states shape: {final_states.shape}")
+                # print(f"[DEBUG] final_states shape: {final_states.shape}")
                 
                 # Normalize states
                 final_states_norm = F.normalize(final_states, dim=-1)
                 final_states_chunks = torch.chunk(final_states_norm, self.n_pred_head, dim=1)
-                print(f"[DEBUG] final_states_chunks[0] shape: {final_states_chunks[0].shape}")
+                # print(f"[DEBUG] final_states_chunks[0] shape: {final_states_chunks[0].shape}")
                 
                 # Get token labels for valid labels
                 token_labels = self.item_id2tokens[valid_labels]  # (num_valid_labels, n_digit)
-                print(f"[DEBUG] token_labels shape: {token_labels.shape}, sample values: {token_labels[:2, :5] if token_labels.shape[0] > 0 else 'None'}")
+                # print(f"[DEBUG] token_labels shape: {token_labels.shape}, sample values: {token_labels[:2, :5] if token_labels.shape[0] > 0 else 'None'}")
                 
                 losses = []
                 for i in range(self.n_pred_head):
                     # Only compute loss for masked positions
                     mask_i = mask[:, i]  # Which samples have this codebook masked (num_valid_labels,)
-                    print(f"[DEBUG] Codebook {i}: mask_i shape: {mask_i.shape}, mask_i sum: {mask_i.sum()}")
+                    # print(f"[DEBUG] Codebook {i}: mask_i shape: {mask_i.shape}, mask_i sum: {mask_i.sum()}")
                     
                     if mask_i.sum() > 0:
                         # Get masked logits and labels
                         masked_logits = torch.matmul(final_states_chunks[i].squeeze(dim=1), token_embs[i].T) / self.temperature
-                        print(f"[DEBUG] Codebook {i}: masked_logits before indexing shape: {masked_logits.shape}")
+                        # print(f"[DEBUG] Codebook {i}: masked_logits before indexing shape: {masked_logits.shape}")
                         masked_logits = masked_logits[mask_i]  # (num_masked, codebook_size)
-                        print(f"[DEBUG] Codebook {i}: masked_logits after indexing shape: {masked_logits.shape}")
+                        # print(f"[DEBUG] Codebook {i}: masked_logits after indexing shape: {masked_logits.shape}")
                         
                         labels = token_labels[:, i] - i * self.config['codebook_size'] - 1
                         masked_labels = labels[mask_i]  # (num_masked,)
                         masked_p_mask = p_mask[mask_i, i]  # (num_masked,)
-                        print(f"[DEBUG] Codebook {i}: masked_labels shape: {masked_labels.shape}, sample values: {masked_labels[:5]}")
-                        print(f"[DEBUG] Codebook {i}: masked_p_mask shape: {masked_p_mask.shape}, range: [{masked_p_mask.min():.3f}, {masked_p_mask.max():.3f}]")
+                        # print(f"[DEBUG] Codebook {i}: masked_labels shape: {masked_labels.shape}, sample values: {masked_labels[:5]}")
+                        # print(f"[DEBUG] Codebook {i}: masked_p_mask shape: {masked_p_mask.shape}, range: [{masked_p_mask.min():.3f}, {masked_p_mask.max():.3f}]")
                         
                         # Weight loss by p_mask (probability of masking)
                         token_loss = F.cross_entropy(masked_logits, masked_labels, reduction='none')
                         weighted_loss = token_loss / masked_p_mask
                         loss_i = torch.mean(weighted_loss)
-                        print(f"[DEBUG] Codebook {i}: loss_i: {loss_i.item():.4f}")
+                        # print(f"[DEBUG] Codebook {i}: loss_i: {loss_i.item():.4f}")
                         losses.append(loss_i)
                 
                 outputs.loss = torch.mean(torch.stack(losses)) if losses else torch.tensor(0.0, device=device)
-                print(f"[DEBUG] Final loss: {outputs.loss.item():.4f}")
+                # print(f"[DEBUG] Final loss: {outputs.loss.item():.4f}")
             else:
                 outputs.loss = torch.tensor(0.0, device=device, requires_grad=True)
         
