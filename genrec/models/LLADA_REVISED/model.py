@@ -428,10 +428,6 @@ class LLADARevised(AbstractModel):
         steps_used = 0
         for t in reversed(range(1, self.T + 1)):
             steps_used += 1
-            # Early stopping: if all codes are determined, stop iterating
-            if (current_codes != self.mask_token_id).all():
-                print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}")
-                break
             
             # Construct input with current codes
             input_tokens = self.item_id2tokens[batch['input_ids']]
@@ -525,6 +521,12 @@ class LLADARevised(AbstractModel):
                 
                 # Early termination: if no more MASK tokens, break
                 if not updated_any:
+                    print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, no updates")
+                    break
+                
+                # Also check if all codes are determined
+                if (current_codes != self.mask_token_id).all():
+                    print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, all codes determined")
                     break
             else:
                 # Last step: use all predictions
