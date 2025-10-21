@@ -509,8 +509,8 @@ class LLADARevised(AbstractModel):
             # Update strategy: determine fixed number of codes per step
             if t > 1:
                 if self.codes_per_step is not None:
-                    # Fixed number of codes to determine each step
-                    num_to_determine = min(self.codes_per_step, (current_codes == self.mask_token_id).sum().item())
+                    # Fixed number of codes to determine each step per sample
+                    num_to_determine = self.codes_per_step
                 else:
                     # Use mask ratio: higher mask ratio -> determine fewer codes
                     mask_ratio = self.get_mask_ratio(t - 1)
@@ -536,7 +536,7 @@ class LLADARevised(AbstractModel):
                                 current_codes[b, idx] = predicted_codes[b, idx]
                                 updated_any = True
                     mask_count_after = (current_codes == self.mask_token_id).sum().item()
-                    print(f"[DEBUG] Step {steps_used}, t={t}: determined {num_to_determine} codes, masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
+                    print(f"[DEBUG] Step {steps_used}, t={t}: determined {num_to_determine} codes per sample, total masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
                     
                     # Early termination: if no more MASK tokens, break
                     if not updated_any:
