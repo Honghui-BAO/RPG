@@ -461,10 +461,6 @@ class LLADARevised(AbstractModel):
             time_emb = self.time_embed(torch.full((batch_size,), t, device=device))
             target_embs = target_embs + time_emb.unsqueeze(1)
             
-            # Add target position embedding
-            target_pos_emb = self.item_pos_embed(torch.full((batch_size,), input_embs.shape[1], device=device))
-            target_embs = target_embs + target_pos_emb.unsqueeze(1)
-            
             # Concatenate
             all_embs = torch.cat([input_embs, target_embs], dim=1)
             
