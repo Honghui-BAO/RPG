@@ -513,11 +513,14 @@ class LLADARevised(AbstractModel):
                 
                 # Update current_codes (only change positions that are still MASK)
                 updated_any = False
+                mask_count_before = (current_codes == self.mask_token_id).sum().item()
                 for b in range(batch_size):
                     for idx in top_k_indices[b]:
                         if current_codes[b, idx] == self.mask_token_id:
                             current_codes[b, idx] = predicted_codes[b, idx]
                             updated_any = True
+                mask_count_after = (current_codes == self.mask_token_id).sum().item()
+                print(f"[DEBUG] Step {steps_used}, t={t}: masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
                 
                 # Early termination: if no more MASK tokens, break
                 if not updated_any:
