@@ -536,19 +536,19 @@ class LLADARevised(AbstractModel):
                                 current_codes[b, idx] = predicted_codes[b, idx]
                                 updated_any = True
                     mask_count_after = (current_codes == self.mask_token_id).sum().item()
-                    print(f"[DEBUG] Step {steps_used}, t={t}: determined {num_to_determine} codes per sample, total masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
+                    # print(f"[DEBUG] Step {steps_used}, t={t}: determined {num_to_determine} codes per sample, total masks {mask_count_before} -> {mask_count_after}, updated_any={updated_any}")
                     
                     # Early termination: if no more MASK tokens, break
                     if not updated_any:
-                        print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, no updates")
+                        # print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, no updates")
                         break
                     
                     # Also check if all codes are determined
                     if (current_codes != self.mask_token_id).all():
-                        print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, all codes determined")
+                        # print(f"[DEBUG] Early termination at step {steps_used}/{self.T}, t={t}, all codes determined")
                         break
                 else:
-                    print(f"[DEBUG] Step {steps_used}, t={t}: no MASK positions left, breaking")
+                    # print(f"[DEBUG] Step {steps_used}, t={t}: no MASK positions left, breaking")
                     break
             else:
                 # Last step: use all predictions
