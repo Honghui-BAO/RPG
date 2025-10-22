@@ -57,9 +57,13 @@ class RPG(AbstractModel):
 
         self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
 
+        # Token-level encoding: n_positions = max_item_seq_len * n_codebook
+        # e.g., 50 * 32 = 1600 positions for token-level
+        n_positions_token_level = config['max_item_seq_len'] * config['n_codebook']
+        
         gpt2config = GPT2Config(
             vocab_size=tokenizer.vocab_size,
-            n_positions=tokenizer.max_token_seq_len,
+            n_positions=n_positions_token_level,  # Expand for token-level encoding
             n_embd=config['n_embd'],
             n_layer=config['n_layer'],
             n_head=config['n_head'],

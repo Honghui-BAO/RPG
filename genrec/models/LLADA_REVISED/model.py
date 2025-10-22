@@ -76,9 +76,12 @@ class LLADARevised(AbstractModel):
         self.mask_token_id = tokenizer.mask_token_id
         
         # GPT2 backbone with causal attention (same as RPG)
+        # Token-level encoding: n_positions = (max_item_seq_len + 1) * n_codebook
+        # e.g., (50 + 1) * 32 = 1632 positions for token-level
+        n_positions_token_level = (config['max_item_seq_len'] + 1) * config['n_codebook']
         gpt2config = GPT2Config(
             vocab_size=tokenizer.vocab_size,  # This includes MASK token (8195)
-            n_positions=tokenizer.max_token_seq_len + 1,  # +1 for target item
+            n_positions=n_positions_token_level,  # Expand for token-level encoding
             n_embd=config['n_embd'],
             n_layer=config['n_layer'],
             n_head=config['n_head'],
