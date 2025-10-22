@@ -292,8 +292,25 @@ class RPG(AbstractModel):
         logits = [torch.matmul(states[:,0,i,:], token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
         logits = [F.log_softmax(logit, dim=-1) for logit in logits]
         token_logits = torch.cat(logits, dim=-1)    # (batch_size, n_tokens)
+        
+        # ========== Stage 1: Generate item codes ==========
+        # Generate tokens by selecting top-1 for each codebook
+        batch_size = token_logits.shape[0]
+        logits_by_head = torch.split(token_logits, self.config['codebook_size'], dim=-1)
+        
+        generated_tokens = []
+        for head_idx, head_logits in enumerate(logits_by_head):
+            # Get the index of top-1 token (0-255) and convert to global token id
+            top_token_idx = head_logits.argmax(dim=-1)  # (batch_size,)
+            # Convert to global token id: add offset for this codebook
+            global_token_id = top_token_idx + head_idx * self.config['codebook_size'] + 1
+            generated_tokens.append(global_token_id)
+        
+        generated_tokens = torch.stack(generated_tokens, dim=-1)  # (batch_size, n_codebook)
 
+        # ========== Stage 2: Match generated codes with item corpus ==========
         if self.generate_w_decoding_graph:
+            # Graph-based decoding (uses token_logits for propagation)
             if not self.init_flag:
                 self.init_graph()
                 self.init_flag = True
@@ -303,25 +320,8 @@ class RPG(AbstractModel):
             )
             return outputs
         elif self.use_token_overlap:
-            # Token overlap counting: generate tokens and count overlaps with corpus
-            batch_size = token_logits.shape[0]
-            
-            # Step 1: Generate tokens by selecting top-1 for each codebook
-            # Split logits by codebook
-            logits_by_head = torch.split(token_logits, self.config['codebook_size'], dim=-1)
-            
-            # Select top-1 token for each codebook (batch_size, n_codebook)
-            generated_tokens = []
-            for head_idx, head_logits in enumerate(logits_by_head):
-                # Get the index of top-1 token (0-255) and convert to global token id
-                top_token_idx = head_logits.argmax(dim=-1)  # (batch_size,)
-                # Convert to global token id: add offset for this codebook
-                global_token_id = top_token_idx + head_idx * self.config['codebook_size'] + 1
-                generated_tokens.append(global_token_id)
-            
-            generated_tokens = torch.stack(generated_tokens, dim=-1)  # (batch_size, n_codebook)
-            
-            # Step 2: Count overlaps with all items in corpus
+            # Use token overlap counting with generated codes
+            # Count overlaps with all items in corpus
             # item_id2tokens: (n_items, n_codebook)
             # generated_tokens: (batch_size, n_codebook)
             
@@ -348,14 +348,32 @@ class RPG(AbstractModel):
             
             return preds.unsqueeze(-1), n_visited_items
         else:
-            # Direct embedding matching - compute logits for all items
-            batch_size = token_logits.shape[0]
-            item_logits = torch.gather(
-                input=token_logits.unsqueeze(-2).expand(-1, self.dataset.n_items, -1),              # (batch_size, n_items, n_tokens)
-                dim=-1,
-                index=(self.item_id2tokens[1:,:] - 1).unsqueeze(0).expand(token_logits.shape[0], -1, -1)  # (batch_size, n_items, code_dim)
-            ).mean(dim=-1)
-            preds = item_logits.topk(n_return_sequences, dim=-1).indices + 1
+            # Direct embedding matching - use generated codes' embedding to match with item corpus
+            # Get embeddings of generated codes
+            generated_embeddings = self.gpt2.wte(generated_tokens).mean(dim=1)  # (batch_size, n_embd)
+            
+            # Get item embeddings by averaging their token embeddings
+            # item_id2tokens: (n_items, n_codebook)
+            all_item_tokens = self.item_id2tokens[1:]  # Skip padding item 0
+            all_item_embeddings = self.gpt2.wte(all_item_tokens).mean(dim=1)  # (n_items-1, n_embd)
+            
+            # Apply normalization if specified
+            if self.config.get('normalize_embeddings', True):
+                generated_embeddings = F.normalize(generated_embeddings, dim=-1)
+                all_item_embeddings = F.normalize(all_item_embeddings, dim=-1)
+            
+            # Compute similarity between generated codes and all items
+            # generated_embeddings: (batch_size, n_embd)
+            # all_item_embeddings: (n_items-1, n_embd)
+            item_similarities = torch.matmul(generated_embeddings, all_item_embeddings.T)  # (batch_size, n_items-1)
+            
+            # Apply temperature if specified
+            similarity_temperature = self.config.get('similarity_temperature', 1.0)
+            if similarity_temperature != 1.0:
+                item_similarities = item_similarities / similarity_temperature
+            
+            # Select top-k items by similarity
+            preds = item_similarities.topk(n_return_sequences, dim=-1).indices + 1  # +1 to convert to 1-indexed item IDs
             
             # Return n_visited_items count (all items in direct matching)
             n_visited_items = torch.FloatTensor([[self.dataset.n_items - 1]] * batch_size)

@@ -64,12 +64,17 @@ if __name__ == '__main__':
     if infer_mode == 'graph':
         pipeline.trainer.model.generate_w_decoding_graph = True
         pipeline.trainer.model.use_token_overlap = False
+        pipeline.log('Using graph-constrained decoding')
     elif infer_mode == 'overlap':
         pipeline.trainer.model.generate_w_decoding_graph = False
         pipeline.trainer.model.use_token_overlap = True
+        pipeline.log('Using token overlap counting')
     else:  # 'direct'
         pipeline.trainer.model.generate_w_decoding_graph = False
         pipeline.trainer.model.use_token_overlap = False
+        pipeline.log('Using direct embedding matching')
+        pipeline.log(f'  - normalize_embeddings: {pipeline.config.get("normalize_embeddings", True)}')
+        pipeline.log(f'  - similarity_temperature: {pipeline.config.get("similarity_temperature", 1.0)}')
     
     # Run evaluation
     pipeline.log(f'Running inference on {split} set...')

@@ -43,3 +43,14 @@ propagation_steps: 3
 #   decoding graph construction
 chunk_size: 1024
 num_workers: 64
+
+# Inference mode configs
+infer_mode: direct  # 'direct', 'graph', 'overlap'
+#   direct: Generate codes then match with item corpus using embedding similarity
+#   graph: Graph-constrained decoding (original RPG)
+#   overlap: Generate codes then match with item corpus using token overlap count
+
+# Direct mode configs (embedding similarity)
+use_embedding_similarity: True  # Use embedding similarity (True) or token overlap (False)
+normalize_embeddings: True  # Normalize embeddings before computing similarity
+similarity_temperature: 1.0  # Temperature for similarity scores (lower = more peaked)
