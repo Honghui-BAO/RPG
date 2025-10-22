@@ -15,7 +15,10 @@ sent_emb_pca: 128
 sent_emb_batch_size: 512
 
 # Config for the backbone model
-max_item_seq_len: 50
+# Token-level encoding: reduce max_item_seq_len since we expand tokens
+# max_item_seq_len * n_codebook should be < n_positions
+# 30 * 32 = 960 positions (safe, GPT2 max is 2048)
+max_item_seq_len: 30  # Reduced from 50 for token-level encoding
 n_embd: 448
 n_layer: 2
 n_head: 4

@@ -114,13 +114,36 @@ class RPG(AbstractModel):
                 f'#Total trainable parameters: {total_params}\n'
 
     def forward(self, batch: dict, return_loss=True) -> torch.Tensor:
-        input_tokens = self.item_id2tokens[batch['input_ids']]
-        input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)
+        # Token-level encoding: don't aggregate at item-level
+        input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_codebook)
+        batch_size, seq_len, n_codebook = input_tokens.shape
+        
+        # Get token embeddings without aggregation
+        input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_codebook, n_embd)
+        
+        # Reshape to treat each token as a separate position
+        # (batch_size, seq_len, n_codebook, n_embd) → (batch_size, seq_len * n_codebook, n_embd)
+        input_embs = input_embs.view(batch_size, seq_len * n_codebook, -1)
+        
+        # Expand attention mask to cover all tokens
+        # Each item position now corresponds to n_codebook token positions
+        # (batch_size, seq_len) → (batch_size, seq_len * n_codebook)
+        attention_mask_expanded = batch['attention_mask'].unsqueeze(-1).expand(-1, -1, n_codebook).reshape(batch_size, -1)
+        
         outputs = self.gpt2(
             inputs_embeds=input_embs,
-            attention_mask=batch['attention_mask']
+            attention_mask=attention_mask_expanded
         )
-        final_states = [self.pred_heads[i](outputs.last_hidden_state).unsqueeze(-2) for i in range(self.n_pred_head)]
+        
+        # outputs.last_hidden_state: (batch_size, seq_len * n_codebook, n_embd)
+        # We need to extract the representation for each item position
+        # Take the last token of each item's n_codebook tokens
+        hidden_states = outputs.last_hidden_state.view(batch_size, seq_len, n_codebook, -1)
+        # Use the last token of each item as the item representation
+        item_hidden_states = hidden_states[:, :, -1, :]  # (batch_size, seq_len, n_embd)
+        
+        # Apply prediction heads
+        final_states = [self.pred_heads[i](item_hidden_states).unsqueeze(-2) for i in range(self.n_pred_head)]
         final_states = torch.cat(final_states, dim=-2)
         outputs.final_states = final_states
         if return_loss:

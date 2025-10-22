@@ -222,14 +222,15 @@ class LLADARevised(AbstractModel):
         # print(f"[DEBUG] mask shape: {mask.shape}, mask sum: {mask.sum()}")
         # print(f"[DEBUG] p_mask shape: {p_mask.shape}, p_mask range: [{p_mask.min():.3f}, {p_mask.max():.3f}]")
         
-        # Get embeddings for history items
+        # Token-level encoding: don't aggregate at item-level
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
         
         # Ensure all tokens are within vocab range
         max_vocab_id = self.gpt2.config.vocab_size - 1
         input_tokens = torch.clamp(input_tokens, 0, max_vocab_id)
         
-        input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)  # (batch_size, seq_len, n_embd)
+        # Get token embeddings without aggregation
+        input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_digit, n_embd)
         
         # Add item position embedding
         seq_lens = batch['seq_lens']
@@ -243,7 +244,8 @@ class LLADARevised(AbstractModel):
         # Add target item embeddings (masked)
         # Ensure masked_codes are within vocab range
         masked_codes = torch.clamp(masked_codes, 0, max_vocab_id)
-        target_embs = self.gpt2.wte(masked_codes).mean(dim=1, keepdim=True)  # (num_valid_labels, 1, n_embd)
+        # Token-level: don't aggregate target codes either
+        target_embs = self.gpt2.wte(masked_codes)  # (num_valid_labels, n_digit, n_embd)
         
         # Time embedding removed - not needed without proper diffusion training
         
@@ -251,7 +253,16 @@ class LLADARevised(AbstractModel):
         # target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
         # target_embs = target_embs + target_pos_emb.unsqueeze(1)
         
-        # Concatenate history and target
+        # Reshape token-level embeddings and concatenate history and target
+        # input_embs: (batch_size, seq_len, n_digit, n_embd)
+        # target_embs: (num_valid_labels, n_digit, n_embd)
+        
+        seq_len_orig = input_embs.shape[1]
+        n_digit = input_embs.shape[2]
+        
+        # Reshape input to (batch_size, seq_len * n_digit, n_embd)
+        input_embs_reshaped = input_embs.view(batch_size, seq_len_orig * n_digit, -1)
+        
         all_embs = []
         for b in range(batch_size):
             # Find valid labels for this batch item
@@ -259,13 +270,10 @@ class LLADARevised(AbstractModel):
             if batch_label_mask.any():
                 # Get target embeddings for this batch - only take the first valid target
                 valid_idx = torch.where(batch_label_mask)[0]
-                target_emb_b = target_embs[valid_idx[0]:valid_idx[0]+1]  # (1, 1, n_embd)
-                # Reshape target_emb_b to match input_embs dimension
-                target_emb_b = target_emb_b.squeeze(1)  # (1, n_embd)
-                target_emb_b = target_emb_b.unsqueeze(0)  # (1, 1, n_embd)
-                all_emb_b = torch.cat([input_embs[b:b+1], target_emb_b], dim=1)
+                target_emb_b = target_embs[valid_idx[0]:valid_idx[0]+1]  # (1, n_digit, n_embd)
+                all_emb_b = torch.cat([input_embs_reshaped[b:b+1], target_emb_b], dim=1)
             else:
-                all_emb_b = input_embs[b:b+1]
+                all_emb_b = input_embs_reshaped[b:b+1]
             all_embs.append(all_emb_b)
         
         # Pad to same length
@@ -280,12 +288,17 @@ class LLADARevised(AbstractModel):
                 pad_emb = torch.zeros(1, pad_len, emb.shape[2], device=device)
                 emb = torch.cat([emb, pad_emb], dim=1)
             
-            # Create attention mask - ensure no out-of-bounds access
+            # Create attention mask - expand for token-level
             attn_mask = torch.ones(1, emb.shape[1], device=device)
-            # Find valid length for this batch item
-            valid_len = seq_lens[b]
-            if valid_len < emb.shape[1]:
-                attn_mask[0, valid_len:] = 0
+            # Find valid length for this batch item (in tokens)
+            valid_len_items = seq_lens[b]
+            valid_len_tokens = valid_len_items * n_digit
+            # Add target tokens if present
+            batch_label_mask = label_mask.view(batch_size, -1)[b]
+            if batch_label_mask.any():
+                valid_len_tokens += n_digit  # Add target item's tokens
+            if valid_len_tokens < emb.shape[1]:
+                attn_mask[0, valid_len_tokens:] = 0
             
             padded_embs.append(emb)
             attention_masks.append(attn_mask)
@@ -302,13 +315,17 @@ class LLADARevised(AbstractModel):
             attention_mask=attention_mask
         )
         
-        # Get representations for target positions
+        # Get representations for target positions (token-level)
         target_hidden = []
         for b in range(batch_size):
             batch_label_mask = label_mask.view(batch_size, -1)[b]
             if batch_label_mask.any():
-                target_pos = seq_lens[b]  # Target is at position seq_len
-                target_hidden.append(outputs.last_hidden_state[b, target_pos:target_pos+1])
+                # Target starts at position (seq_len * n_digit)
+                target_start_pos = seq_lens[b] * n_digit
+                # Extract n_digit tokens for the target
+                target_tokens = outputs.last_hidden_state[b, target_start_pos:target_start_pos+n_digit, :]
+                # Use the last token as the target representation
+                target_hidden.append(target_tokens[-1:, :])
             else:
                 # Dummy hidden state if no valid label
                 target_hidden.append(torch.zeros(1, outputs.last_hidden_state.shape[-1], device=device))
