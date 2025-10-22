@@ -118,12 +118,23 @@ class RPG(AbstractModel):
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_codebook)
         batch_size, seq_len, n_codebook = input_tokens.shape
         
+        # Debug: check validity
+        if (input_tokens < 0).any() or (input_tokens >= self.gpt2.config.vocab_size).any():
+            print(f"[ERROR] Invalid tokens in RPG!")
+            print(f"  vocab_size: {self.gpt2.config.vocab_size}")
+            print(f"  input_tokens range: [{input_tokens.min()}, {input_tokens.max()}]")
+        
         # Get token embeddings without aggregation
         input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_codebook, n_embd)
         
         # Reshape to treat each token as a separate position
         # (batch_size, seq_len, n_codebook, n_embd) → (batch_size, seq_len * n_codebook, n_embd)
         input_embs = input_embs.view(batch_size, seq_len * n_codebook, -1)
+        
+        # Debug: check sequence length
+        total_positions = seq_len * n_codebook
+        if total_positions > self.gpt2.config.n_positions:
+            print(f"[WARNING] RPG: Sequence length {total_positions} exceeds GPT2 limit {self.gpt2.config.n_positions}!")
         
         # Expand attention mask to cover all tokens
         # Each item position now corresponds to n_codebook token positions

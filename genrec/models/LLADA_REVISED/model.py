@@ -229,6 +229,12 @@ class LLADARevised(AbstractModel):
         max_vocab_id = self.gpt2.config.vocab_size - 1
         input_tokens = torch.clamp(input_tokens, 0, max_vocab_id)
         
+        # Debug: check token validity
+        if (input_tokens < 0).any() or (input_tokens >= self.gpt2.config.vocab_size).any():
+            print(f"[ERROR] Invalid input tokens detected!")
+            print(f"  vocab_size: {self.gpt2.config.vocab_size}")
+            print(f"  input_tokens min: {input_tokens.min()}, max: {input_tokens.max()}")
+        
         # Get token embeddings without aggregation
         input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_digit, n_embd)
         
@@ -259,6 +265,13 @@ class LLADARevised(AbstractModel):
         
         seq_len_orig = input_embs.shape[1]
         n_digit = input_embs.shape[2]
+        
+        # Debug: check sequence length
+        total_seq_len = seq_len_orig * n_digit + n_digit  # history + target
+        print(f"[DEBUG] Token-level sequence length: {seq_len_orig} items * {n_digit} tokens + {n_digit} target = {total_seq_len} positions")
+        print(f"[DEBUG] GPT2 n_positions: {self.gpt2.config.n_positions}")
+        if total_seq_len > self.gpt2.config.n_positions:
+            print(f"[WARNING] Sequence length {total_seq_len} exceeds GPT2 limit {self.gpt2.config.n_positions}!")
         
         # Reshape input to (batch_size, seq_len * n_digit, n_embd)
         input_embs_reshaped = input_embs.view(batch_size, seq_len_orig * n_digit, -1)
