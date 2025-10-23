@@ -166,18 +166,43 @@ class MHL(AbstractModel):
         if return_loss:
             # Compute reconstruction loss for masked tokens
             recon_loss = self.compute_reconstruction_loss(
-                final_states, input_tokens, mask, batch['labels']
+                outputs.last_hidden_state, input_tokens, mask, batch['labels']
             )
-            outputs.loss = recon_loss
+            
+            # Compute next-item prediction loss (same as RPG)
+            next_item_loss = 0.0
+            if 'labels' in batch:
+                label_mask = batch['labels'].view(-1) != -100
+                if label_mask.any():
+                    selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
+                    selected_states = F.normalize(selected_states, dim=-1)
+                    selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
+                    
+                    token_emb = self.gpt2.wte.weight[1:-1]
+                    token_emb = F.normalize(token_emb, dim=-1)
+                    token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
+                    
+                    token_labels = self.item_id2tokens[batch['labels'].view(-1)[label_mask]]
+                    losses = [
+                        self.loss_fct(
+                            torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature,
+                            token_labels[:, i] - i * self.config['codebook_size'] - 1
+                        )
+                        for i in range(self.n_pred_head)
+                    ]
+                    next_item_loss = torch.mean(torch.stack(losses))
+            
+            # Combine losses
+            outputs.loss = recon_loss + next_item_loss
             
         return outputs
 
-    def compute_reconstruction_loss(self, final_states, original_tokens, mask, labels):
+    def compute_reconstruction_loss(self, sequence_hidden_states, original_tokens, mask, labels):
         """
         Compute reconstruction loss for masked tokens
         
         Args:
-            final_states: (batch_size, n_pred_head, n_embd) - predicted states
+            sequence_hidden_states: (batch_size, seq_len, n_embd) - sequence hidden states from GPT2
             original_tokens: (batch_size, seq_len, n_codebook) - original tokens
             mask: (batch_size, seq_len, n_codebook) - mask indicating masked positions
             labels: target labels for next-item prediction
@@ -185,7 +210,7 @@ class MHL(AbstractModel):
         Returns:
             loss: combined reconstruction and next-item prediction loss
         """
-        batch_size = final_states.shape[0]
+        batch_size, seq_len, n_embd = sequence_hidden_states.shape
         
         # 1. Reconstruction loss for masked tokens
         recon_loss = 0.0
@@ -195,13 +220,16 @@ class MHL(AbstractModel):
             token_emb = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
             
-            # Normalize final states
-            final_states_norm = F.normalize(final_states, dim=-1)
+            # Normalize sequence hidden states
+            sequence_hidden_norm = F.normalize(sequence_hidden_states, dim=-1)
             
-            # For each masked position, compute prediction loss
+            # For each codebook position, compute prediction loss
             for i in range(self.n_pred_head):
-                # Get predictions for this codebook position
-                pred_logits = torch.matmul(final_states_norm[:, i, :], token_embs[i].T) / self.temperature
+                # Get predictions for this codebook position at each sequence position
+                # sequence_hidden_norm: (batch_size, seq_len, n_embd)
+                # token_embs[i]: (vocab_size, n_embd)
+                pred_logits = torch.matmul(sequence_hidden_norm, token_embs[i].T) / self.temperature
+                # pred_logits: (batch_size, seq_len, vocab_size)
                 
                 # Get original tokens for this position
                 original_tokens_i = original_tokens[:, :, i]  # (batch_size, seq_len)
@@ -209,15 +237,8 @@ class MHL(AbstractModel):
                 
                 # Only compute loss for masked positions
                 if mask_i.any():
-                    # pred_logits shape: (batch_size, vocab_size)
-                    # We need to expand it to match the sequence positions
-                    batch_size, seq_len = original_tokens_i.shape
-                    
-                    # Expand pred_logits to (batch_size, seq_len, vocab_size)
-                    pred_logits_expanded = pred_logits.unsqueeze(1).expand(batch_size, seq_len, -1)
-                    
                     # Flatten for loss computation
-                    pred_logits_flat = pred_logits_expanded.reshape(-1, token_embs[i].shape[0])
+                    pred_logits_flat = pred_logits.reshape(-1, token_embs[i].shape[0])
                     original_tokens_flat = original_tokens_i.view(-1)
                     mask_flat = mask_i.view(-1)
                     
@@ -232,32 +253,9 @@ class MHL(AbstractModel):
                         recon_loss += self.loss_fct(masked_pred, adjusted_target)
         
         # 2. Next-item prediction loss (same as RPG)
-        next_item_loss = 0.0
-        if labels is not None:
-            label_mask = labels.view(-1) != -100
-            if label_mask.any():
-                selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
-                selected_states = F.normalize(selected_states, dim=-1)
-                selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
-                
-                token_emb = self.gpt2.wte.weight[1:-1]
-                token_emb = F.normalize(token_emb, dim=-1)
-                token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
-                
-                token_labels = self.item_id2tokens[labels.view(-1)[label_mask]]
-                losses = [
-                    self.loss_fct(
-                        torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature,
-                        token_labels[:, i] - i * self.config['codebook_size'] - 1
-                    )
-                    for i in range(self.n_pred_head)
-                ]
-                next_item_loss = torch.mean(torch.stack(losses))
-        
-        # Combine losses
-        total_loss = recon_loss + next_item_loss
-        
-        return total_loss
+        # Note: This will be computed in the main forward method using final_states
+        # For now, we only return the reconstruction loss
+        return recon_loss
 
     def generate(self, batch, n_return_sequences=1):
         """Generate predictions (same as RPG)"""
