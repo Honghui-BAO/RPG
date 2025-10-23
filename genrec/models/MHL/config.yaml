@@ -43,3 +43,7 @@ propagation_steps: 3
 #   decoding graph construction
 chunk_size: 1024
 num_workers: 64
+
+# Token masking configs
+mask_ratio: 0.15  # Percentage of tokens to mask (0.0 to 1.0)
+reconstruction_weight: 0.5  # Weight for reconstruction loss

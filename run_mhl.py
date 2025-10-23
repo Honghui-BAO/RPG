@@ -93,6 +93,10 @@ def build_command(args, config):
         cmd[cmd.index(f'--eval_batch_size={config["eval_batch_size"]}')] = f'--eval_batch_size={args.batch_size}'
     if args.epochs is not None:
         cmd[cmd.index(f'--max_epochs={config["max_epochs"]}')] = f'--max_epochs={args.epochs}'
+    if args.mask_ratio is not None:
+        cmd.append(f'--mask_ratio={args.mask_ratio}')
+    if args.reconstruction_weight is not None:
+        cmd.append(f'--reconstruction_weight={args.reconstruction_weight}')
     
     return cmd
 
@@ -185,6 +189,10 @@ def main():
                        help='Batch size for training and evaluation (overrides default)')
     parser.add_argument('--epochs', type=int, default=None,
                        help='Maximum number of epochs (overrides default)')
+    parser.add_argument('--mask_ratio', type=float, default=None,
+                       help='Token masking ratio (0.0 to 1.0)')
+    parser.add_argument('--reconstruction_weight', type=float, default=None,
+                       help='Weight for reconstruction loss')
     
     args = parser.parse_args()
     
