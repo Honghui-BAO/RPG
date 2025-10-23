@@ -175,10 +175,17 @@ class MHL(AbstractModel):
             token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
             token_logits = [torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
             token_labels = self.item_id2tokens[batch['labels'].view(-1)[label_mask]]
-            losses = [
-                self.loss_fct(token_logits[i], token_labels[:, i] - i * self.config['codebook_size'] - 1)
-                for i in range(self.n_pred_head)
-            ]
+            
+            # Debug: check token ranges
+            print(f"[DEBUG] token_labels shape: {token_labels.shape}")
+            print(f"[DEBUG] token_labels range: [{token_labels.min()}, {token_labels.max()}]")
+            
+            losses = []
+            for i in range(self.n_pred_head):
+                target_tokens = token_labels[:, i] - i * self.config['codebook_size'] - 1
+                print(f"[DEBUG] Head {i}: target_tokens range: [{target_tokens.min()}, {target_tokens.max()}]")
+                print(f"[DEBUG] Head {i}: token_logits shape: {token_logits[i].shape}")
+                losses.append(self.loss_fct(token_logits[i], target_tokens))
             next_item_loss = torch.mean(torch.stack(losses))
             
             # Combine losses (only next-item loss for now)
