@@ -209,9 +209,15 @@ class MHL(AbstractModel):
                 
                 # Only compute loss for masked positions
                 if mask_i.any():
+                    # pred_logits shape: (batch_size, vocab_size)
+                    # We need to expand it to match the sequence positions
+                    batch_size, seq_len = original_tokens_i.shape
+                    
+                    # Expand pred_logits to (batch_size, seq_len, vocab_size)
+                    pred_logits_expanded = pred_logits.unsqueeze(1).expand(batch_size, seq_len, -1)
+                    
                     # Flatten for loss computation
-                    seq_len = original_tokens_i.shape[1]
-                    pred_logits_flat = pred_logits.unsqueeze(1).expand(-1, seq_len, -1).reshape(-1, token_embs[i].shape[0])
+                    pred_logits_flat = pred_logits_expanded.reshape(-1, token_embs[i].shape[0])
                     original_tokens_flat = original_tokens_i.view(-1)
                     mask_flat = mask_i.view(-1)
                     
