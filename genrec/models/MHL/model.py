@@ -168,40 +168,21 @@ class MHL(AbstractModel):
             recon_loss = 0.0
             
             # Compute next-item prediction loss (same as RPG)
-            next_item_loss = 0.0
-            if 'labels' in batch:
-                label_mask = batch['labels'].view(-1) != -100
-                if label_mask.any():
-                    # Debug: check shapes
-                    print(f"[DEBUG] final_states shape: {final_states.shape}")
-                    print(f"[DEBUG] label_mask shape: {label_mask.shape}")
-                    print(f"[DEBUG] batch['labels'] shape: {batch['labels'].shape}")
-                    
-                    # Fix the indexing issue
-                    batch_size = final_states.shape[0]
-                    labels_flat = batch['labels'].view(-1)
-                    valid_labels = labels_flat[label_mask]
-                    
-                    if len(valid_labels) > 0:
-                        # final_states shape: (batch_size, n_pred_head, n_embd)
-                        # We need to select states for valid labels
-                        selected_states = final_states[label_mask]  # (num_valid_labels, n_pred_head, n_embd)
-                        selected_states = F.normalize(selected_states, dim=-1)
-                        selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
-                        
-                        token_emb = self.gpt2.wte.weight[1:self.eos_token]  # Only semantic tokens
-                        token_emb = F.normalize(token_emb, dim=-1)
-                        token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
-                        
-                        token_labels = self.item_id2tokens[valid_labels]
-                        losses = [
-                            self.loss_fct(
-                                torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature,
-                                token_labels[:, i] - i * self.config['codebook_size'] - 1
-                            )
-                            for i in range(self.n_pred_head)
-                        ]
-                        next_item_loss = torch.mean(torch.stack(losses))
+            assert 'labels' in batch, 'The batch must contain the labels.'
+            label_mask = batch['labels'].view(-1) != -100
+            selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
+            selected_states = F.normalize(selected_states, dim=-1)
+            selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
+            token_emb = self.gpt2.wte.weight[1:self.eos_token]  # Only semantic tokens
+            token_emb = F.normalize(token_emb, dim=-1)
+            token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
+            token_logits = [torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
+            token_labels = self.item_id2tokens[batch['labels'].view(-1)[label_mask]]
+            losses = [
+                self.loss_fct(token_logits[i], token_labels[:, i] - i * self.config['codebook_size'] - 1)
+                for i in range(self.n_pred_head)
+            ]
+            next_item_loss = torch.mean(torch.stack(losses))
             
             # Combine losses (only next-item loss for now)
             outputs.loss = next_item_loss
