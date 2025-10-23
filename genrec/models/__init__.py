@@ -7,3 +7,4 @@
 from genrec.models.RPG.model import RPG
 from genrec.models.LLADA.model import LLaDARecommender as LLADA
 from genrec.models.LLADA_REVISED.model import LLADARevised as LLADA_REVISED
+from genrec.models.MHL.model import MHL

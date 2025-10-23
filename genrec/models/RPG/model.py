@@ -57,13 +57,13 @@ class RPG(AbstractModel):
 
         self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
 
-        # Token-level encoding: n_positions = max_item_seq_len * n_codebook
-        # e.g., 50 * 32 = 1600 positions for token-level
-        n_positions_token_level = config['max_item_seq_len'] * config['n_codebook']
+        # Item-level encoding: n_positions = max_item_seq_len (back to original)
+        # e.g., 50 positions for item-level
+        n_positions_item_level = config['max_item_seq_len']
         
         gpt2config = GPT2Config(
             vocab_size=tokenizer.vocab_size,
-            n_positions=n_positions_token_level,  # Expand for token-level encoding
+            n_positions=n_positions_item_level,  # Back to item-level encoding
             n_embd=config['n_embd'],
             n_layer=config['n_layer'],
             n_head=config['n_head'],
@@ -118,7 +118,7 @@ class RPG(AbstractModel):
                 f'#Total trainable parameters: {total_params}\n'
 
     def forward(self, batch: dict, return_loss=True) -> torch.Tensor:
-        # Token-level encoding: don't aggregate at item-level
+        # Item-level encoding: aggregate tokens to get item representations
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_codebook)
         batch_size, seq_len, n_codebook = input_tokens.shape
         
@@ -128,34 +128,26 @@ class RPG(AbstractModel):
             print(f"  vocab_size: {self.gpt2.config.vocab_size}")
             print(f"  input_tokens range: [{input_tokens.min()}, {input_tokens.max()}]")
         
-        # Get token embeddings without aggregation
+        # Get token embeddings and aggregate to item-level
         input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_codebook, n_embd)
-        
-        # Reshape to treat each token as a separate position
-        # (batch_size, seq_len, n_codebook, n_embd) → (batch_size, seq_len * n_codebook, n_embd)
-        input_embs = input_embs.view(batch_size, seq_len * n_codebook, -1)
+        # Average pool across n_codebook dimension to get item-level embeddings
+        input_embs = input_embs.mean(dim=-2)  # (batch_size, seq_len, n_embd)
         
         # Debug: check sequence length
-        total_positions = seq_len * n_codebook
-        if total_positions > self.gpt2.config.n_positions:
-            print(f"[WARNING] RPG: Sequence length {total_positions} exceeds GPT2 limit {self.gpt2.config.n_positions}!")
-        
-        # Expand attention mask to cover all tokens
-        # Each item position now corresponds to n_codebook token positions
-        # (batch_size, seq_len) → (batch_size, seq_len * n_codebook)
-        attention_mask_expanded = batch['attention_mask'].unsqueeze(-1).expand(-1, -1, n_codebook).reshape(batch_size, -1)
+        if seq_len > self.gpt2.config.n_positions:
+            print(f"[WARNING] RPG: Sequence length {seq_len} exceeds GPT2 limit {self.gpt2.config.n_positions}!")
         
         outputs = self.gpt2(
             inputs_embeds=input_embs,
-            attention_mask=attention_mask_expanded
+            attention_mask=batch['attention_mask']
         )
         
-        # outputs.last_hidden_state: (batch_size, seq_len * n_codebook, n_embd)
-        # Extract the last token's embedding from the entire sequence
-        last_token_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
+        # outputs.last_hidden_state: (batch_size, seq_len, n_embd)
+        # Extract the last item's embedding from the sequence
+        last_item_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
         
-        # Apply prediction heads to the last token's embedding
-        final_states = [self.pred_heads[i](last_token_hidden).unsqueeze(0).unsqueeze(0) for i in range(self.n_pred_head)]
+        # Apply prediction heads to the last item's embedding
+        final_states = [self.pred_heads[i](last_item_hidden).unsqueeze(0).unsqueeze(0) for i in range(self.n_pred_head)]
         final_states = torch.cat(final_states, dim=1)  # (batch_size, n_pred_head, n_embd)
         outputs.final_states = final_states
         if return_loss:

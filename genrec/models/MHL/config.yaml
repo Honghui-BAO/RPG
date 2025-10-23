@@ -1,0 +1,37 @@
+# MHL (Masked Hierarchical Learning) Model Configuration
+# Based on RPG but with masking during training and reconstruction loss
+
+# Model architecture
+n_embd: 768
+n_layer: 6
+n_head: 12
+n_inner: 3072
+activation_function: "gelu_new"
+resid_pdrop: 0.1
+embd_pdrop: 0.1
+attn_pdrop: 0.1
+layer_norm_epsilon: 1e-5
+initializer_range: 0.02
+
+# Sequence configuration
+max_item_seq_len: 50
+n_codebook: 32
+codebook_size: 256
+
+# Training configuration
+mask_ratio: 0.15  # Mask 15% of tokens during training
+temperature: 0.07
+
+# Graph decoding configuration (inherited from RPG)
+generate_w_decoding_graph: false
+chunk_size: 1024
+num_beams: 50
+n_edges: 50
+propagation_steps: 3
+
+# Device
+device: "cuda"
+
+# Loss configuration
+recon_loss_weight: 1.0  # Weight for reconstruction loss
+next_item_loss_weight: 1.0  # Weight for next-item prediction loss

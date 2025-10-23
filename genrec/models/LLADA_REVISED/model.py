@@ -76,12 +76,12 @@ class LLADARevised(AbstractModel):
         self.mask_token_id = tokenizer.mask_token_id
         
         # GPT2 backbone with causal attention (same as RPG)
-        # Token-level encoding: n_positions = (max_item_seq_len + 1) * n_codebook
-        # e.g., (50 + 1) * 32 = 1632 positions for token-level
-        n_positions_token_level = (config['max_item_seq_len'] + 1) * config['n_codebook']
+        # Item-level encoding: n_positions = max_item_seq_len + 1 (back to original)
+        # e.g., 50 + 1 = 51 positions for item-level
+        n_positions_item_level = config['max_item_seq_len'] + 1
         gpt2config = GPT2Config(
             vocab_size=tokenizer.vocab_size,  # This includes MASK token (8195)
-            n_positions=n_positions_token_level,  # Expand for token-level encoding
+            n_positions=n_positions_item_level,  # Back to item-level encoding
             n_embd=config['n_embd'],
             n_layer=config['n_layer'],
             n_head=config['n_head'],
@@ -225,7 +225,7 @@ class LLADARevised(AbstractModel):
         # print(f"[DEBUG] mask shape: {mask.shape}, mask sum: {mask.sum()}")
         # print(f"[DEBUG] p_mask shape: {p_mask.shape}, p_mask range: [{p_mask.min():.3f}, {p_mask.max():.3f}]")
         
-        # Token-level encoding: don't aggregate at item-level
+        # Item-level encoding: aggregate tokens to get item representations
         input_tokens = self.item_id2tokens[batch['input_ids']]  # (batch_size, seq_len, n_digit)
         
         # Ensure all tokens are within vocab range
@@ -238,8 +238,10 @@ class LLADARevised(AbstractModel):
             print(f"  vocab_size: {self.gpt2.config.vocab_size}")
             print(f"  input_tokens min: {input_tokens.min()}, max: {input_tokens.max()}")
         
-        # Get token embeddings without aggregation
+        # Get token embeddings and aggregate to item-level
         input_embs = self.gpt2.wte(input_tokens)  # (batch_size, seq_len, n_digit, n_embd)
+        # Average pool across n_digit dimension to get item-level embeddings
+        input_embs = input_embs.mean(dim=-2)  # (batch_size, seq_len, n_embd)
         
         # Add item position embedding
         seq_lens = batch['seq_lens']
@@ -253,8 +255,8 @@ class LLADARevised(AbstractModel):
         # Add target item embeddings (masked)
         # Ensure masked_codes are within vocab range
         masked_codes = torch.clamp(masked_codes, 0, max_vocab_id)
-        # Token-level: don't aggregate target codes either
-        target_embs = self.gpt2.wte(masked_codes)  # (num_valid_labels, n_digit, n_embd)
+        # Item-level: aggregate target codes to get item-level embeddings
+        target_embs = self.gpt2.wte(masked_codes).mean(dim=-2)  # (num_valid_labels, n_embd)
         
         # Time embedding removed - not needed without proper diffusion training
         
@@ -262,22 +264,18 @@ class LLADARevised(AbstractModel):
         # target_pos_emb = self.item_pos_embed(torch.full((valid_labels.shape[0],), max_len, device=device))
         # target_embs = target_embs + target_pos_emb.unsqueeze(1)
         
-        # Reshape token-level embeddings and concatenate history and target
-        # input_embs: (batch_size, seq_len, n_digit, n_embd)
-        # target_embs: (num_valid_labels, n_digit, n_embd)
+        # Concatenate item-level embeddings for history and target
+        # input_embs: (batch_size, seq_len, n_embd)
+        # target_embs: (num_valid_labels, n_embd)
         
         seq_len_orig = input_embs.shape[1]
-        n_digit = input_embs.shape[2]
         
         # Debug: check sequence length
-        total_seq_len = seq_len_orig * n_digit + n_digit  # history + target
-        print(f"[DEBUG] Token-level sequence length: {seq_len_orig} items * {n_digit} tokens + {n_digit} target = {total_seq_len} positions")
+        total_seq_len = seq_len_orig + 1  # history + target
+        print(f"[DEBUG] Item-level sequence length: {seq_len_orig} items + 1 target = {total_seq_len} positions")
         print(f"[DEBUG] GPT2 n_positions: {self.gpt2.config.n_positions}")
         if total_seq_len > self.gpt2.config.n_positions:
             print(f"[WARNING] Sequence length {total_seq_len} exceeds GPT2 limit {self.gpt2.config.n_positions}!")
-        
-        # Reshape input to (batch_size, seq_len * n_digit, n_embd)
-        input_embs_reshaped = input_embs.view(batch_size, seq_len_orig * n_digit, -1)
         
         all_embs = []
         for b in range(batch_size):
@@ -286,10 +284,10 @@ class LLADARevised(AbstractModel):
             if batch_label_mask.any():
                 # Get target embeddings for this batch - only take the first valid target
                 valid_idx = torch.where(batch_label_mask)[0]
-                target_emb_b = target_embs[valid_idx[0]:valid_idx[0]+1]  # (1, n_digit, n_embd)
-                all_emb_b = torch.cat([input_embs_reshaped[b:b+1], target_emb_b], dim=1)
+                target_emb_b = target_embs[valid_idx[0]:valid_idx[0]+1]  # (1, n_embd)
+                all_emb_b = torch.cat([input_embs[b:b+1], target_emb_b], dim=1)
             else:
-                all_emb_b = input_embs_reshaped[b:b+1]
+                all_emb_b = input_embs[b:b+1]
             all_embs.append(all_emb_b)
         
         # Pad to same length
@@ -304,17 +302,16 @@ class LLADARevised(AbstractModel):
                 pad_emb = torch.zeros(1, pad_len, emb.shape[2], device=device)
                 emb = torch.cat([emb, pad_emb], dim=1)
             
-            # Create attention mask - expand for token-level
+            # Create attention mask - item-level
             attn_mask = torch.ones(1, emb.shape[1], device=device)
-            # Find valid length for this batch item (in tokens)
+            # Find valid length for this batch item (in items)
             valid_len_items = seq_lens[b]
-            valid_len_tokens = valid_len_items * n_digit
-            # Add target tokens if present
+            # Add target item if present
             batch_label_mask = label_mask.view(batch_size, -1)[b]
             if batch_label_mask.any():
-                valid_len_tokens += n_digit  # Add target item's tokens
-            if valid_len_tokens < emb.shape[1]:
-                attn_mask[0, valid_len_tokens:] = 0
+                valid_len_items += 1  # Add target item
+            if valid_len_items < emb.shape[1]:
+                attn_mask[0, valid_len_items:] = 0
             
             padded_embs.append(emb)
             attention_masks.append(attn_mask)
@@ -331,13 +328,13 @@ class LLADARevised(AbstractModel):
             attention_mask=attention_mask
         )
         
-        # Extract the last token's embedding from the entire sequence
-        # This represents the aggregated information from all tokens
-        last_token_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
+        # Extract the last item's embedding from the entire sequence
+        # This represents the aggregated information from all items
+        last_item_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
         
         # Get representations for all codebook positions
         final_states = torch.cat([
-            self.pred_heads[i](last_token_hidden).unsqueeze(1) 
+            self.pred_heads[i](last_item_hidden).unsqueeze(1) 
             for i in range(self.n_pred_head)
         ], dim=1)  # (batch_size, n_pred_head, n_embd)
         
