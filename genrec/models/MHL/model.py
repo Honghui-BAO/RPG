@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2Config
-from ..base import BaseModel
+from genrec.model import AbstractModel
+from genrec.dataset import AbstractDataset
+from genrec.tokenizer import AbstractTokenizer
 import random
 
 
-class MHL(BaseModel):
+class MHL(AbstractModel):
     """
     Masked Hierarchical Learning (MHL) Model
     
@@ -24,7 +26,12 @@ class MHL(BaseModel):
     - Masking strategy: Random mask ratio during training
     """
     
-    def __init__(self, config, dataset, tokenizer):
+    def __init__(
+        self,
+        config: dict,
+        dataset: AbstractDataset,
+        tokenizer: AbstractTokenizer
+    ):
         super(MHL, self).__init__(config, dataset, tokenizer)
         
         self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
@@ -48,6 +55,7 @@ class MHL(BaseModel):
         self.gpt2 = GPT2Model(gpt2config)
         
         # Prediction heads for each codebook position
+        self.n_pred_head = self.tokenizer.n_digit
         self.pred_heads = nn.ModuleList([
             nn.Linear(config['n_embd'], config['n_embd']) 
             for _ in range(self.n_pred_head)
@@ -55,6 +63,9 @@ class MHL(BaseModel):
         
         # Loss function
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+        
+        # Temperature for logits
+        self.temperature = self.config['temperature']
         
         # Masking parameters
         self.mask_ratio = config.get('mask_ratio', 0.15)  # Default 15% masking ratio
