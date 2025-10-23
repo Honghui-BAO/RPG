@@ -151,15 +151,12 @@ class RPG(AbstractModel):
         )
         
         # outputs.last_hidden_state: (batch_size, seq_len * n_codebook, n_embd)
-        # We need to extract the representation for each item position
-        # Take the last token of each item's n_codebook tokens
-        hidden_states = outputs.last_hidden_state.view(batch_size, seq_len, n_codebook, -1)
-        # Use the last token of each item as the item representation
-        item_hidden_states = hidden_states[:, :, -1, :]  # (batch_size, seq_len, n_embd)
+        # Extract the last token's embedding from the entire sequence
+        last_token_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
         
-        # Apply prediction heads
-        final_states = [self.pred_heads[i](item_hidden_states).unsqueeze(-2) for i in range(self.n_pred_head)]
-        final_states = torch.cat(final_states, dim=-2)
+        # Apply prediction heads to the last token's embedding
+        final_states = [self.pred_heads[i](last_token_hidden).unsqueeze(0).unsqueeze(0) for i in range(self.n_pred_head)]
+        final_states = torch.cat(final_states, dim=1)  # (batch_size, n_pred_head, n_embd)
         outputs.final_states = final_states
         if return_loss:
             assert 'labels' in batch, 'The batch must contain the labels.'
@@ -315,16 +312,14 @@ class RPG(AbstractModel):
 
     def generate(self, batch, n_return_sequences=1):
         outputs = self.forward(batch, return_loss=False)
-        states = outputs.final_states.gather(
-            dim=1,
-            index=(batch['seq_lens'] - 1).view(-1, 1, 1, 1).expand(-1, 1, self.n_pred_head, self.config['n_embd'])
-        )
+        # final_states is already (batch_size, n_pred_head, n_embd) from the last token
+        states = outputs.final_states  # (batch_size, n_pred_head, n_embd)
         states = F.normalize(states, dim=-1)
 
         token_emb = self.gpt2.wte.weight[1:-1]
         token_emb = F.normalize(token_emb, dim=-1)
         token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
-        logits = [torch.matmul(states[:,0,i,:], token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
+        logits = [torch.matmul(states[:,i,:], token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
         logits = [F.log_softmax(logit, dim=-1) for logit in logits]
         token_logits = torch.cat(logits, dim=-1)    # (batch_size, n_tokens)
 

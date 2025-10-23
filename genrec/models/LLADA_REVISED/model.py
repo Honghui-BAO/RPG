@@ -331,28 +331,15 @@ class LLADARevised(AbstractModel):
             attention_mask=attention_mask
         )
         
-        # Get representations for target positions (token-level)
-        target_hidden = []
-        for b in range(batch_size):
-            batch_label_mask = label_mask.view(batch_size, -1)[b]
-            if batch_label_mask.any():
-                # Target starts at position (seq_len * n_digit)
-                target_start_pos = seq_lens[b] * n_digit
-                # Extract n_digit tokens for the target
-                target_tokens = outputs.last_hidden_state[b, target_start_pos:target_start_pos+n_digit, :]
-                # Use the last token as the target representation
-                target_hidden.append(target_tokens[-1:, :])
-            else:
-                # Dummy hidden state if no valid label
-                target_hidden.append(torch.zeros(1, outputs.last_hidden_state.shape[-1], device=device))
-        
-        target_hidden = torch.cat(target_hidden, dim=0)  # (batch_size, n_embd)
+        # Extract the last token's embedding from the entire sequence
+        # This represents the aggregated information from all tokens
+        last_token_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
         
         # Get representations for all codebook positions
         final_states = torch.cat([
-            self.pred_heads[i](target_hidden).unsqueeze(1) 
+            self.pred_heads[i](last_token_hidden).unsqueeze(1) 
             for i in range(self.n_pred_head)
-        ], dim=1)  # (batch_size, n_digit, n_embd)
+        ], dim=1)  # (batch_size, n_pred_head, n_embd)
         
         outputs.final_states = final_states
         
