@@ -154,13 +154,9 @@ class MHL(AbstractModel):
             attention_mask=batch['attention_mask']
         )
         
-        # outputs.last_hidden_state: (batch_size, seq_len, n_embd)
-        # Extract the last item's embedding from the sequence
-        last_item_hidden = outputs.last_hidden_state[:, -1, :]  # (batch_size, n_embd)
-        
-        # Apply prediction heads to the last item's embedding
-        final_states = [self.pred_heads[i](last_item_hidden).unsqueeze(0).unsqueeze(0) for i in range(self.n_pred_head)]
-        final_states = torch.cat(final_states, dim=1)  # (batch_size, n_pred_head, n_embd)
+        # Apply prediction heads to the last item's embedding (follow main branch RPG exactly)
+        final_states = [self.pred_heads[i](outputs.last_hidden_state).unsqueeze(-2) for i in range(self.n_pred_head)]
+        final_states = torch.cat(final_states, dim=-2)
         outputs.final_states = final_states
         
         if return_loss:
@@ -169,11 +165,12 @@ class MHL(AbstractModel):
             
             # Compute next-item prediction loss (same as RPG)
             assert 'labels' in batch, 'The batch must contain the labels.'
+            
             label_mask = batch['labels'].view(-1) != -100
             selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
             selected_states = F.normalize(selected_states, dim=-1)
             selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
-            token_emb = self.gpt2.wte.weight[1:self.eos_token]  # Only semantic tokens
+            token_emb = self.gpt2.wte.weight[1:-1]
             token_emb = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
             token_logits = [torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
