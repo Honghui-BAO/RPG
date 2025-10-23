@@ -20,6 +20,7 @@ echo "=========================================="
 CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --model=MHL \
     --category=Beauty \
+    --run_id=mhl_beauty \
     --lr=0.01 \
     --temperature=0.07 \
     --n_codebook=32 \

@@ -19,6 +19,7 @@ echo "=========================================="
 CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --model=MHL \
     --category=Beauty \
+    --run_id=mhl_test \
     --checkpoint=./checkpoints/MHL/Beauty/best_model.pt \
     --eval_only=true \
     --eval_batch_size=256 \

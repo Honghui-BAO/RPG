@@ -39,11 +39,18 @@ class Pipeline:
         self.config['device'], self.config['use_ddp'] = init_device() 
         self.checkpoint_path = checkpoint_path
 
-        # Accelerator
+        # Accelerator - Create shorter project dir name to avoid long path issues
+        from genrec.utils import get_command_line_args_str
+        import hashlib
+        
+        # Generate a short hash for the command line args
+        cmd_args = get_command_line_args_str()
+        args_hash = hashlib.md5(cmd_args.encode()).hexdigest()[:8]
+        
         self.project_dir = os.path.join(
             self.config['tensorboard_log_dir'],
             self.config["dataset"],
-            self.config["model"]
+            f"{self.config['model']}_{args_hash}"
         )
         self.accelerator = Accelerator(log_with='tensorboard', project_dir=self.project_dir)
         self.config['accelerator'] = self.accelerator

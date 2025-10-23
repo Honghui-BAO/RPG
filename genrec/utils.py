@@ -61,7 +61,12 @@ def get_local_time():
 
 
 def get_command_line_args_str():
-    return '_'.join(sys.argv).replace('/', '|')
+    # Limit command line args to avoid long filenames
+    args_str = '_'.join(sys.argv).replace('/', '|')
+    # Truncate if too long (keep first 100 chars and last 50 chars)
+    if len(args_str) > 150:
+        args_str = args_str[:100] + '...' + args_str[-50:]
+    return args_str
 
 
 def get_file_name(config: dict, suffix: str = ''):
