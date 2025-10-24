@@ -219,31 +219,36 @@ class MHL(AbstractModel):
                 if mask_positions.any():
                     batch_size, seq_len, n_digit = mask_positions.shape
                     
-                    # Get all masked token positions
-                    masked_positions_flat = mask_positions.view(-1)  # (batch_size * seq_len * n_digit,)
-                    masked_final_states_flat = masked_final_states.view(-1, self.n_pred_head, self.config['n_embd'])  # (batch_size * seq_len, n_pred_head, n_embd)
-                    original_tokens_flat = original_tokens.view(-1, n_digit)  # (batch_size * seq_len, n_digit)
+                    # Get masked positions for each sequence position
+                    reconstruction_losses = []
                     
-                    # Get states and tokens for masked positions
-                    masked_states = masked_final_states_flat[masked_positions_flat]  # (num_masked_tokens, n_pred_head, n_embd)
-                    original_tokens_masked = original_tokens_flat[masked_positions_flat]  # (num_masked_tokens, n_digit)
+                    for i in range(batch_size):
+                        for seq_idx in range(seq_len):
+                            # Check if this sequence position has any masked tokens
+                            if mask_positions[i, seq_idx].any():
+                                # Get the state for this sequence position
+                                seq_state = masked_final_states[i, seq_idx]  # (n_pred_head, n_embd)
+                                
+                                # Get masked token positions for this sequence
+                                masked_tokens_pos = mask_positions[i, seq_idx]  # (n_digit,)
+                                original_tokens_seq = original_tokens[i, seq_idx]  # (n_digit,)
+                                
+                                # Normalize state
+                                seq_state = F.normalize(seq_state, dim=-1)
+                                seq_state = torch.chunk(seq_state, self.n_pred_head, dim=0)
+                                
+                                # Calculate loss for each digit that was masked
+                                for digit_idx in range(n_digit):
+                                    if masked_tokens_pos[digit_idx]:
+                                        # Get logits for this digit
+                                        digit_logits = torch.matmul(seq_state[digit_idx], token_embs[digit_idx].T) / self.temperature
+                                        # Get original token for this digit
+                                        digit_label = original_tokens_seq[digit_idx] - digit_idx * self.config['codebook_size'] - 1
+                                        # Calculate loss
+                                        digit_loss = self.loss_fct(digit_logits.unsqueeze(0), digit_label.unsqueeze(0))
+                                        reconstruction_losses.append(digit_loss)
                     
-                    if len(masked_states) > 0:
-                        # Normalize states
-                        masked_states = F.normalize(masked_states, dim=-1)
-                        masked_states = torch.chunk(masked_states, self.n_pred_head, dim=1)
-                        
-                        # Calculate reconstruction loss for each digit
-                        reconstruction_losses = []
-                        for i in range(self.n_pred_head):
-                            # Get logits for this digit
-                            digit_logits = torch.matmul(masked_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature
-                            # Get original tokens for this digit
-                            digit_labels = original_tokens_masked[:, i] - i * self.config['codebook_size'] - 1
-                            # Calculate loss
-                            digit_loss = self.loss_fct(digit_logits, digit_labels)
-                            reconstruction_losses.append(digit_loss)
-                        
+                    if reconstruction_losses:
                         reconstruction_loss = torch.mean(torch.stack(reconstruction_losses))
                     else:
                         reconstruction_loss = torch.tensor(0.0, device=masked_final_states.device)
