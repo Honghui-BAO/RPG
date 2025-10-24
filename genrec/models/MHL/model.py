@@ -112,7 +112,7 @@ class MHL(AbstractModel):
 
     def _create_masked_tokens(self, input_tokens: torch.Tensor, attention_mask: torch.Tensor) -> tuple:
         """
-        Create masked version of input tokens for reconstruction task.
+        Create token-level masked version of input tokens for reconstruction task.
         
         Args:
             input_tokens (torch.Tensor): Original input tokens of shape (batch_size, seq_len, n_digit)
@@ -120,34 +120,43 @@ class MHL(AbstractModel):
             
         Returns:
             tuple: (masked_tokens, mask_positions, original_tokens)
-                - masked_tokens: Tokens with some positions masked
-                - mask_positions: Boolean tensor indicating which positions were masked
+                - masked_tokens: Tokens with some individual tokens masked
+                - mask_positions: Boolean tensor indicating which tokens were masked (batch_size, seq_len, n_digit)
                 - original_tokens: Original tokens for reconstruction loss
         """
         batch_size, seq_len, n_digit = input_tokens.shape
         device = input_tokens.device
         
-        # Create mask positions (only for valid positions, not padding)
-        mask_positions = torch.zeros_like(attention_mask, dtype=torch.bool, device=device)
+        # Create token-level mask positions
+        mask_positions = torch.zeros_like(input_tokens, dtype=torch.bool, device=device)
         
         for i in range(batch_size):
             # Get valid sequence length for this batch item
             valid_len = attention_mask[i].sum().item()
             if valid_len > 0:
-                # Calculate number of tokens to mask
-                num_to_mask = max(1, int(valid_len * self.mask_ratio))
-                # Randomly select positions to mask
-                valid_positions = torch.arange(valid_len, device=device)
-                masked_positions = valid_positions[torch.randperm(valid_len, device=device)[:num_to_mask]]
-                mask_positions[i, masked_positions] = True
+                # Calculate total number of tokens to mask across all valid items
+                total_valid_tokens = valid_len * n_digit
+                num_tokens_to_mask = max(1, int(total_valid_tokens * self.mask_ratio))
+                
+                # Create list of all valid token positions
+                valid_token_positions = []
+                for seq_idx in range(valid_len):
+                    for digit_idx in range(n_digit):
+                        valid_token_positions.append((seq_idx, digit_idx))
+                
+                # Randomly select token positions to mask
+                if len(valid_token_positions) > 0:
+                    selected_indices = torch.randperm(len(valid_token_positions), device=device)[:num_tokens_to_mask]
+                    for idx in selected_indices:
+                        seq_idx, digit_idx = valid_token_positions[idx]
+                        mask_positions[i, seq_idx, digit_idx] = True
         
         # Create masked tokens
         masked_tokens = input_tokens.clone()
         original_tokens = input_tokens.clone()
         
-        # Replace masked positions with mask token
-        mask_positions_expanded = mask_positions.unsqueeze(-1).expand(-1, -1, n_digit)
-        masked_tokens[mask_positions_expanded] = self.mask_token_id
+        # Replace masked token positions with mask token
+        masked_tokens[mask_positions] = self.mask_token_id
         
         return masked_tokens, mask_positions, original_tokens
 
@@ -206,29 +215,38 @@ class MHL(AbstractModel):
                 masked_final_states = [self.pred_heads[i](masked_outputs.last_hidden_state).unsqueeze(-2) for i in range(self.n_pred_head)]
                 masked_final_states = torch.cat(masked_final_states, dim=-2)
                 
-                # Calculate reconstruction loss only for masked positions
+                # Calculate reconstruction loss only for masked token positions
                 if mask_positions.any():
-                    # Get states for masked positions
-                    batch_size, seq_len = mask_positions.shape
-                    masked_states = masked_final_states[mask_positions]  # (num_masked, n_pred_head, n_embd)
-                    original_tokens_masked = original_tokens[mask_positions]  # (num_masked, n_digit)
+                    batch_size, seq_len, n_digit = mask_positions.shape
                     
-                    # Normalize states
-                    masked_states = F.normalize(masked_states, dim=-1)
-                    masked_states = torch.chunk(masked_states, self.n_pred_head, dim=1)
+                    # Get all masked token positions
+                    masked_positions_flat = mask_positions.view(-1)  # (batch_size * seq_len * n_digit,)
+                    masked_final_states_flat = masked_final_states.view(-1, self.n_pred_head, self.config['n_embd'])  # (batch_size * seq_len, n_pred_head, n_embd)
+                    original_tokens_flat = original_tokens.view(-1, n_digit)  # (batch_size * seq_len, n_digit)
                     
-                    # Calculate reconstruction loss for each digit
-                    reconstruction_losses = []
-                    for i in range(self.n_pred_head):
-                        # Get logits for this digit
-                        digit_logits = torch.matmul(masked_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature
-                        # Get original tokens for this digit
-                        digit_labels = original_tokens_masked[:, i] - i * self.config['codebook_size'] - 1
-                        # Calculate loss
-                        digit_loss = self.loss_fct(digit_logits, digit_labels)
-                        reconstruction_losses.append(digit_loss)
+                    # Get states and tokens for masked positions
+                    masked_states = masked_final_states_flat[masked_positions_flat]  # (num_masked_tokens, n_pred_head, n_embd)
+                    original_tokens_masked = original_tokens_flat[masked_positions_flat]  # (num_masked_tokens, n_digit)
                     
-                    reconstruction_loss = torch.mean(torch.stack(reconstruction_losses))
+                    if len(masked_states) > 0:
+                        # Normalize states
+                        masked_states = F.normalize(masked_states, dim=-1)
+                        masked_states = torch.chunk(masked_states, self.n_pred_head, dim=1)
+                        
+                        # Calculate reconstruction loss for each digit
+                        reconstruction_losses = []
+                        for i in range(self.n_pred_head):
+                            # Get logits for this digit
+                            digit_logits = torch.matmul(masked_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature
+                            # Get original tokens for this digit
+                            digit_labels = original_tokens_masked[:, i] - i * self.config['codebook_size'] - 1
+                            # Calculate loss
+                            digit_loss = self.loss_fct(digit_logits, digit_labels)
+                            reconstruction_losses.append(digit_loss)
+                        
+                        reconstruction_loss = torch.mean(torch.stack(reconstruction_losses))
+                    else:
+                        reconstruction_loss = torch.tensor(0.0, device=masked_final_states.device)
             
             # Combine losses
             total_loss = recommendation_loss + self.reconstruction_weight * reconstruction_loss
