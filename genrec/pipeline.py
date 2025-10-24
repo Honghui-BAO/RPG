@@ -39,13 +39,14 @@ class Pipeline:
         self.config['device'], self.config['use_ddp'] = init_device() 
         self.checkpoint_path = checkpoint_path
 
-        # Accelerator
+        # Accelerator - use minimal logging to avoid filename too long error
         self.project_dir = os.path.join(
             self.config['tensorboard_log_dir'],
             self.config["dataset"],
             self.config["model"]
         )
-        self.accelerator = Accelerator(log_with='tensorboard', project_dir=self.project_dir)
+        # Use minimal logging to avoid path length issues
+        self.accelerator = Accelerator(log_with=None)  # Disable tensorboard logging
         self.config['accelerator'] = self.accelerator
 
         # Seed and Logger

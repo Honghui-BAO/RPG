@@ -61,16 +61,32 @@ def get_local_time():
 
 
 def get_command_line_args_str():
-    return '_'.join(sys.argv).replace('/', '|')
+    # Limit the command line args to avoid overly long paths
+    args_str = '_'.join(sys.argv).replace('/', '|')
+    # Truncate if too long (keep first 100 chars and last 50 chars)
+    if len(args_str) > 150:
+        args_str = args_str[:100] + '...' + args_str[-50:]
+    return args_str
 
 
 def get_file_name(config: dict, suffix: str = ''):
     config_str = "".join([str(value) for key, value in config.items() if key != 'accelerator'])
     md5 = hashlib.md5(config_str.encode(encoding="utf-8")).hexdigest()[:6]
     command_line_args = get_command_line_args_str()
+    
+    # Create a shorter filename to avoid path length issues
     logfilename = "{}-{}-{}-{}{}".format(
         config["run_id"], command_line_args, config['run_local_time'], md5, suffix
     )
+    
+    # Ensure filename is not too long (max 200 chars)
+    if len(logfilename) > 200:
+        # Keep run_id, timestamp, and md5, truncate command line args
+        short_args = command_line_args[:50] + '...' if len(command_line_args) > 50 else command_line_args
+        logfilename = "{}-{}-{}-{}{}".format(
+            config["run_id"], short_args, config['run_local_time'], md5, suffix
+        )
+    
     return logfilename
 
 
