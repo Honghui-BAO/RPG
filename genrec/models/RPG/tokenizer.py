@@ -379,7 +379,7 @@ class RPGTokenizer(AbstractTokenizer):
         
         # Load T5-base word embeddings
         self.log(f'[TOKENIZER] Loading T5-base word embeddings...')
-        t5_model = T5EncoderModel.from_pretrained('t5-base')
+        t5_model = T5EncoderModel.from_pretrained('google-t5/t5-base')
         t5_word_embeddings = t5_model.shared.weight.data.clone()  # (32128, 768)
         self.log(f'[TOKENIZER] T5 word embeddings shape: {t5_word_embeddings.shape}')
         

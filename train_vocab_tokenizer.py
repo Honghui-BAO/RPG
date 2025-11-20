@@ -81,7 +81,7 @@ def main():
         raise ValueError("VocabTokenizer not initialized!")
     
     vocab_tokenizer = tokenizer.vocab_tokenizer
-    dataset = pipeline.dataset
+    dataset = pipeline.raw_dataset  # Pipeline has raw_dataset, not dataset
     
     # Load T5 embeddings for training
     print(f"\n[TRAIN] Loading T5 embeddings...")
