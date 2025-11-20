@@ -7,12 +7,15 @@
 import os
 import math
 import json
+import torch
 import numpy as np
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
+from transformers import T5EncoderModel, T5Tokenizer
 
 from genrec.dataset import AbstractDataset
 from genrec.tokenizer import AbstractTokenizer
+from genrec.models.RPG.vocab_encoder_decoder import VocabTokenizer
 
 
 class RPGTokenizer(AbstractTokenizer):
@@ -38,31 +41,52 @@ class RPGTokenizer(AbstractTokenizer):
         eos_token (int): The end-of-sequence token.
     """
     def __init__(self, config: dict, dataset: AbstractDataset):
-        self.n_codebook_bits = self._get_codebook_bits(config['codebook_size'])
-        self.index_factory = f'OPQ{config["n_codebook"]},IVF1,PQ{config["n_codebook"]}x{self.n_codebook_bits}'
-
+        # Determine tokenizer type
+        self.tokenizer_type = config.get('tokenizer_type', 'opq')
+        
+        if self.tokenizer_type == 'opq':
+            # OPQ tokenizer initialization
+            self.n_codebook_bits = self._get_codebook_bits(config['codebook_size'])
+            self.index_factory = f'OPQ{config["n_codebook"]},IVF1,PQ{config["n_codebook"]}x{self.n_codebook_bits}'
+        
         super(RPGTokenizer, self).__init__(config, dataset)
         self.item2id = dataset.item2id
         self.user2id = dataset.user2id
         self.id2item = dataset.id_mapping['id2item']
+        
+        # Initialize tokenizer based on type
         self.item2tokens = self._init_tokenizer(dataset)
-        self.eos_token = self.n_digit * self.codebook_size + 1
+        
+        # Set eos_token based on tokenizer type
+        if self.tokenizer_type == 'opq':
+            self.eos_token = self.n_digit * self.codebook_size + 1
+        else:  # vocab tokenizer
+            self.eos_token = self.vocab_size - 1  # Last token in T5 vocab as EOS
+        
         self.ignored_label = -100
 
     @property
     def n_digit(self):
         """
-        Returns the number of digits for the tokenizer.
-
-        The number of digits is determined by the value of `rq_n_codebooks` in the configuration.
+        Returns the number of digits (tokens per item) for the tokenizer.
+        
+        For OPQ: determined by n_codebook in config (e.g., 32)
+        For vocab: fixed at 4
         """
+        if self.tokenizer_type == 'vocab':
+            return 4
         return self.config['n_codebook']
 
     @property
     def codebook_size(self):
         """
-        Returns an integer representing the number of codebooks for the tokenizer.
+        Returns the codebook size for the tokenizer.
+        
+        For OPQ: from config (e.g., 256)
+        For vocab: T5 vocab size (32128)
         """
+        if self.tokenizer_type == 'vocab':
+            return self.vocab_size
         return self.config['codebook_size']
 
     @property
@@ -78,8 +102,13 @@ class RPGTokenizer(AbstractTokenizer):
     @property
     def vocab_size(self) -> int:
         """
-        Returns the vocabulary size for the TIGER tokenizer.
+        Returns the vocabulary size for the tokenizer.
+        
+        For OPQ: n_digit * codebook_size + 2 (padding + eos)
+        For vocab: T5 vocab size (32128) + 2 (padding + eos)
         """
+        if self.tokenizer_type == 'vocab':
+            return 32128 + 2  # T5 vocab + padding + eos
         return self.eos_token + 1
 
     def _get_codebook_bits(self, n_codebook):
@@ -248,7 +277,22 @@ class RPGTokenizer(AbstractTokenizer):
 
     def _init_tokenizer(self, dataset: AbstractDataset):
         """
-        Initialize the tokenizer.
+        Initialize the tokenizer (OPQ or vocab based on config).
+
+        Args:
+            dataset (AbstractDataset): The dataset object.
+
+        Returns:
+            dict: A dictionary mapping items to tokens.
+        """
+        if self.tokenizer_type == 'vocab':
+            return self._init_vocab_tokenizer(dataset)
+        else:
+            return self._init_opq_tokenizer(dataset)
+    
+    def _init_opq_tokenizer(self, dataset: AbstractDataset):
+        """
+        Initialize the OPQ-based tokenizer.
 
         Args:
             dataset (AbstractDataset): The dataset object.
@@ -290,6 +334,96 @@ class RPGTokenizer(AbstractTokenizer):
         item2sem_ids = json.load(open(sem_ids_path, 'r'))
         item2tokens = self._sem_ids_to_tokens(item2sem_ids)
 
+        return item2tokens
+    
+    def _init_vocab_tokenizer(self, dataset: AbstractDataset):
+        """
+        Initialize the vocab-based tokenizer.
+
+        Args:
+            dataset (AbstractDataset): The dataset object.
+
+        Returns:
+            dict: A dictionary mapping items to 4-token representations.
+        """
+        # Path for vocab tokenizer checkpoint
+        vocab_checkpoint_path = self.config.get('vocab_checkpoint')
+        if vocab_checkpoint_path is None:
+            vocab_checkpoint_path = os.path.join(
+                dataset.cache_dir, 'processed',
+                f'{os.path.basename(self.config["sent_emb_model"])}_vocab_tokenizer.pt'
+            )
+        
+        # Path for vocab tokens
+        vocab_tokens_path = os.path.join(
+            dataset.cache_dir, 'processed',
+            f'{os.path.basename(self.config["sent_emb_model"])}_vocab_tokens.json'
+        )
+        
+        # Load T5 embeddings (full 768d, no PCA)
+        sent_emb_path = os.path.join(
+            dataset.cache_dir, 'processed',
+            f'{os.path.basename(self.config["sent_emb_model"])}.sent_emb'
+        )
+        
+        if os.path.exists(sent_emb_path):
+            self.log(f'[TOKENIZER] Loading sentence embeddings from {sent_emb_path}...')
+            sent_embs = np.fromfile(sent_emb_path, dtype=np.float32).reshape(-1, self.config['sent_emb_dim'])
+        else:
+            self.log(f'[TOKENIZER] Encoding sentence embeddings...')
+            sent_embs = self._encode_sent_emb(dataset, sent_emb_path)
+        
+        # NOTE: No PCA for vocab tokenizer - we use full 768d embeddings
+        self.log(f'[TOKENIZER] Sentence embeddings shape: {sent_embs.shape}')
+        assert sent_embs.shape[1] == 768, f"Expected 768d embeddings, got {sent_embs.shape[1]}d"
+        
+        # Load T5-base word embeddings
+        self.log(f'[TOKENIZER] Loading T5-base word embeddings...')
+        t5_model = T5EncoderModel.from_pretrained('t5-base')
+        t5_word_embeddings = t5_model.shared.weight.data.clone()  # (32128, 768)
+        self.log(f'[TOKENIZER] T5 word embeddings shape: {t5_word_embeddings.shape}')
+        
+        # Initialize or load vocab tokenizer
+        if os.path.exists(vocab_checkpoint_path):
+            self.log(f'[TOKENIZER] Loading pretrained vocab tokenizer from {vocab_checkpoint_path}...')
+            self.vocab_tokenizer = VocabTokenizer(self.config, t5_word_embeddings, self.log)
+            checkpoint = torch.load(vocab_checkpoint_path, map_location=self.config.get('device', 'cpu'))
+            self.vocab_tokenizer.load_state_dict(checkpoint['model_state_dict'])
+            self.vocab_tokenizer.eval()
+        else:
+            self.log(f'[TOKENIZER] WARNING: No pretrained vocab tokenizer found at {vocab_checkpoint_path}')
+            self.log(f'[TOKENIZER] Please train the vocab tokenizer first using train_vocab_tokenizer.py')
+            self.log(f'[TOKENIZER] Initializing untrained vocab tokenizer for now...')
+            self.vocab_tokenizer = VocabTokenizer(self.config, t5_word_embeddings, self.log)
+            self.vocab_tokenizer.eval()
+        
+        # Generate or load 4-token representations
+        if os.path.exists(vocab_tokens_path):
+            self.log(f'[TOKENIZER] Loading vocab tokens from {vocab_tokens_path}...')
+            item2tokens = json.load(open(vocab_tokens_path, 'r'))
+            # Convert lists to tuples
+            for item in item2tokens:
+                item2tokens[item] = tuple(item2tokens[item])
+        else:
+            self.log(f'[TOKENIZER] Generating 4-token representations for all items...')
+            sent_embs_tensor = torch.from_numpy(sent_embs).to(self.vocab_tokenizer.device)
+            
+            with torch.no_grad():
+                token_indices = self.vocab_tokenizer.tokenize_items(sent_embs_tensor)  # (n_items, 4)
+            
+            # Convert to dict: item -> tuple of 4 token IDs (offset by +1 for padding)
+            item2tokens = {}
+            for i in range(token_indices.shape[0]):
+                item = self.id2item[i + 1]
+                # Add 1 to all token indices (0 is reserved for padding)
+                tokens = tuple((token_indices[i] + 1).cpu().numpy().tolist())
+                item2tokens[item] = tokens
+            
+            # Save vocab tokens
+            self.log(f'[TOKENIZER] Saving vocab tokens to {vocab_tokens_path}...')
+            with open(vocab_tokens_path, 'w') as f:
+                json.dump(item2tokens, f)
+        
         return item2tokens
 
     def _tokenize_first_n_items(self, item_seq: list) -> tuple:

@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2Config, GPT2Model
+from transformers import GPT2Config, GPT2Model, T5Config, T5EncoderModel
 
 from genrec.dataset import AbstractDataset
 from genrec.model import AbstractModel
@@ -56,29 +56,50 @@ class RPG(AbstractModel):
         super(RPG, self).__init__(config, dataset, tokenizer)
 
         self.item_id2tokens = self._map_item_tokens().to(self.config['device'])
+        
+        # Determine backbone type
+        self.backbone_type = config.get('backbone', 'gpt2')
+        
+        if self.backbone_type == 't5':
+            # T5 Encoder backbone
+            t5config = T5Config(
+                vocab_size=tokenizer.vocab_size,
+                d_model=768,  # T5-base hidden size, must match for vocab tokenizer
+                num_layers=config.get('n_layer', 2),
+                num_heads=config.get('n_head', 12),
+                d_ff=config.get('n_inner', 3072),
+                dropout_rate=config.get('resid_pdrop', 0.1),
+            )
+            self.encoder = T5EncoderModel(t5config)
+            self.hidden_size = 768
+        else:
+            # GPT2 backbone (default)
+            gpt2config = GPT2Config(
+                vocab_size=tokenizer.vocab_size,
+                n_positions=tokenizer.max_token_seq_len,
+                n_embd=config['n_embd'],
+                n_layer=config['n_layer'],
+                n_head=config['n_head'],
+                n_inner=config['n_inner'],
+                activation_function=config['activation_function'],
+                resid_pdrop=config['resid_pdrop'],
+                embd_pdrop=config['embd_pdrop'],
+                attn_pdrop=config['attn_pdrop'],
+                layer_norm_epsilon=config['layer_norm_epsilon'],
+                initializer_range=config['initializer_range'],
+                eos_token_id=tokenizer.eos_token,
+            )
+            self.encoder = GPT2Model(gpt2config)
+            self.hidden_size = config['n_embd']
+        
+        # For backward compatibility, keep gpt2 reference
+        self.gpt2 = self.encoder
 
-        gpt2config = GPT2Config(
-            vocab_size=tokenizer.vocab_size,
-            n_positions=tokenizer.max_token_seq_len,
-            n_embd=config['n_embd'],
-            n_layer=config['n_layer'],
-            n_head=config['n_head'],
-            n_inner=config['n_inner'],
-            activation_function=config['activation_function'],
-            resid_pdrop=config['resid_pdrop'],
-            embd_pdrop=config['embd_pdrop'],
-            attn_pdrop=config['attn_pdrop'],
-            layer_norm_epsilon=config['layer_norm_epsilon'],
-            initializer_range=config['initializer_range'],
-            eos_token_id=tokenizer.eos_token,
-        )
-
-        self.gpt2 = GPT2Model(gpt2config)
-
+        # Number of prediction heads depends on tokenizer type
         self.n_pred_head = self.tokenizer.n_digit
         pred_head_list = []
         for i in range(self.n_pred_head):
-            pred_head_list.append(ResBlock(self.config['n_embd']))
+            pred_head_list.append(ResBlock(self.hidden_size))
         self.pred_heads = nn.Sequential(*pred_head_list)
 
         self.temperature = self.config['temperature']
@@ -108,37 +129,70 @@ class RPG(AbstractModel):
     @property
     def n_parameters(self) -> str:
         total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        emb_params = sum(p.numel() for p in self.gpt2.get_input_embeddings().parameters() if p.requires_grad)
+        # Get embedding layer based on backbone type
+        if self.backbone_type == 't5':
+            emb_params = sum(p.numel() for p in self.encoder.shared.parameters() if p.requires_grad)
+        else:
+            emb_params = sum(p.numel() for p in self.encoder.get_input_embeddings().parameters() if p.requires_grad)
         return f'#Embedding parameters: {emb_params}\n' \
                 f'#Non-embedding parameters: {total_params - emb_params}\n' \
                 f'#Total trainable parameters: {total_params}\n'
 
     def forward(self, batch: dict, return_loss=True) -> torch.Tensor:
         input_tokens = self.item_id2tokens[batch['input_ids']]
-        input_embs = self.gpt2.wte(input_tokens).mean(dim=-2)
-        outputs = self.gpt2(
+        
+        # Get embeddings based on backbone type
+        if self.backbone_type == 't5':
+            # T5 uses shared embedding layer
+            input_embs = self.encoder.shared(input_tokens).mean(dim=-2)
+        else:
+            # GPT2 uses wte embedding layer
+            input_embs = self.encoder.wte(input_tokens).mean(dim=-2)
+        
+        # Forward through encoder
+        outputs = self.encoder(
             inputs_embeds=input_embs,
             attention_mask=batch['attention_mask']
         )
+        
         final_states = [self.pred_heads[i](outputs.last_hidden_state).unsqueeze(-2) for i in range(self.n_pred_head)]
         final_states = torch.cat(final_states, dim=-2)
         outputs.final_states = final_states
+        
         if return_loss:
             assert 'labels' in batch, 'The batch must contain the labels.'
             label_mask = batch['labels'].view(-1) != -100
-            selected_states = final_states.view(-1, self.n_pred_head, self.config['n_embd'])[label_mask]
+            selected_states = final_states.view(-1, self.n_pred_head, self.hidden_size)[label_mask]
             selected_states = F.normalize(selected_states, dim=-1)
             selected_states = torch.chunk(selected_states, self.n_pred_head, dim=1)
-            token_emb = self.gpt2.wte.weight[1:-1]
+            
+            # Get token embeddings based on backbone type
+            if self.backbone_type == 't5':
+                token_emb = self.encoder.shared.weight[1:-1]
+            else:
+                token_emb = self.encoder.wte.weight[1:-1]
+            
             token_emb = F.normalize(token_emb, dim=-1)
             token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
             token_logits = [torch.matmul(selected_states[i].squeeze(dim=1), token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]
             token_labels = self.item_id2tokens[batch['labels'].view(-1)[label_mask]]
-            losses = [
-                self.loss_fct(token_logits[i], token_labels[:, i] - i * self.config['codebook_size'] - 1)
-                for i in range(self.n_pred_head)
-            ]
+            
+            # Calculate loss - different chunking for vocab (4) vs OPQ (32)
+            if self.tokenizer.tokenizer_type == 'vocab':
+                # For vocab tokenizer, tokens are already in [1, vocab_size] range, no offset needed
+                losses = [
+                    self.loss_fct(token_logits[i], token_labels[:, i] - 1)
+                    for i in range(self.n_pred_head)
+                ]
+            else:
+                # For OPQ tokenizer, tokens have codebook offset
+                losses = [
+                    self.loss_fct(token_logits[i], token_labels[:, i] - i * self.config['codebook_size'] - 1)
+                    for i in range(self.n_pred_head)
+                ]
+            
             outputs.loss = torch.mean(torch.stack(losses))
+        
         return outputs
 
     def build_ii_sim_mat(self):
@@ -279,11 +333,16 @@ class RPG(AbstractModel):
         outputs = self.forward(batch, return_loss=False)
         states = outputs.final_states.gather(
             dim=1,
-            index=(batch['seq_lens'] - 1).view(-1, 1, 1, 1).expand(-1, 1, self.n_pred_head, self.config['n_embd'])
+            index=(batch['seq_lens'] - 1).view(-1, 1, 1, 1).expand(-1, 1, self.n_pred_head, self.hidden_size)
         )
         states = F.normalize(states, dim=-1)
 
-        token_emb = self.gpt2.wte.weight[1:-1]
+        # Get token embeddings based on backbone type
+        if self.backbone_type == 't5':
+            token_emb = self.encoder.shared.weight[1:-1]
+        else:
+            token_emb = self.encoder.wte.weight[1:-1]
+        
         token_emb = F.normalize(token_emb, dim=-1)
         token_embs = torch.chunk(token_emb, self.n_pred_head, dim=0)
         logits = [torch.matmul(states[:,0,i,:], token_embs[i].T) / self.temperature for i in range(self.n_pred_head)]

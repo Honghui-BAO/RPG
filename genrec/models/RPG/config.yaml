@@ -43,3 +43,19 @@ propagation_steps: 3
 #   decoding graph construction
 chunk_size: 1024
 num_workers: 64
+
+# Tokenizer type selection
+tokenizer_type: opq  # 'opq' or 'vocab'
+
+# Vocab tokenizer configs (only used when tokenizer_type='vocab')
+vocab_hidden_dim: 512
+vocab_num_layers: 2
+vocab_dropout: 0.1
+vocab_lr: 0.001
+vocab_epochs: 100
+vocab_batch_size: 256
+vocab_checkpoint: null  # Path to pretrained vocab tokenizer, null to use default
+
+# Model backbone selection (for future T5 integration)
+backbone: gpt2  # 'gpt2' or 't5'
+
